@@ -1,0 +1,23 @@
+# Secrets
+.env
+.env.*
+!.env.example
+agent.env
+agent-pro.env
+*.skey
+*.vkey
+wallet*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local services and tools
+.local/
+pgdata/
+deploy/data/
+masumi-payment-service/
+*.log

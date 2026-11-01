@@ -1,0 +1,11 @@
+.env
+.env.*
+**/.env
+deploy
+.git
+.local
+pgdata
+masumi-payment-service
+__pycache__
+.pytest_cache
+tests

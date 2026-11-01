@@ -1,0 +1,109 @@
+# Crypto BD Lead Finder + Masumi Payment Service on one host (Cardano Preprod only).
+#
+#   cd deploy && cp .env.example .env && cp agent.env.example agent.env   # fill in, see README
+#   docker compose up -d --build
+#
+# Only the agent (8080) is meant to be public. The Payment Service listens on 127.0.0.1:3001;
+# open its admin through an SSH port forward. Payment Service services follow the official
+# masumi-services-dev-quickstart (release 0.29.0).
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: masumi
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: payment
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U masumi -d payment"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # The 0.29.0 runtime image cannot seed, so this one-shot service builds the same release from
+  # source, applies migrations, seeds an empty database (Preprod wallets) and exits.
+  payment-setup:
+    build:
+      context: https://github.com/masumi-network/masumi-payment-service.git#0.29.0
+      dockerfile_inline: |
+        FROM node:20-slim
+        RUN apt-get update -y && apt-get install -y openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+        RUN corepack enable && corepack prepare pnpm@10.30.2 --activate
+        WORKDIR /usr/src/app
+        COPY . .
+        RUN pnpm install --frozen-lockfile
+    image: masumi-payment-setup:0.29.0
+    environment:
+      DATABASE_URL: postgresql://masumi:${POSTGRES_PASSWORD}@postgres:5432/payment?schema=public
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env}
+      ADMIN_KEY: ${ADMIN_KEY:?set ADMIN_KEY in .env}
+      BLOCKFROST_API_KEY_PREPROD: ${BLOCKFROST_API_KEY_PREPROD:?set BLOCKFROST_API_KEY_PREPROD in .env}
+      SEED_ONLY_IF_EMPTY: "TRUE"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "pnpm run prisma:migrate && pnpm run prisma:seed"
+    restart: "no"
+
+  payment-service:
+    image: ghcr.io/masumi-network/masumi-payment-service:0.29.0
+    environment:
+      DATABASE_URL: postgresql://masumi:${POSTGRES_PASSWORD}@postgres:5432/payment?schema=public
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      BLOCK_CONFIRMATIONS_THRESHOLD: "0"
+      CHECK_TX_INTERVAL: "15"
+    ports:
+      - "127.0.0.1:3001:3001"
+    depends_on:
+      payment-setup:
+        condition: service_completed_successfully
+    # The image's default `pnpm run start` tries to download pnpm; start the server directly.
+    command: ["node", "./dist/index.js"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3001/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  agent:
+    build: ..
+    env_file: agent.env
+    environment:
+      NETWORK: Preprod
+      PAYMENT_SERVICE_URL: http://payment-service:3001/api/v1
+      AGENT_DATABASE_URL: postgresql://masumi:${POSTGRES_PASSWORD}@postgres:5432/agent_jobs
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Pro tier: same image, registered as its own agent with its own price and agent identifier.
+  # Jobs go to the agent_jobs_pro table; feedback and suppression are shared with the standard agent.
+  agent-pro:
+    image: deploy-agent:latest
+    pull_policy: never
+    env_file: agent-pro.env
+    environment:
+      NETWORK: Preprod
+      AGENT_TIER: pro
+      PAYMENT_SERVICE_URL: http://payment-service:3001/api/v1
+      AGENT_DATABASE_URL: postgresql://masumi:${POSTGRES_PASSWORD}@postgres:5432/agent_jobs
+      PORT: "8080"
+    ports:
+      - "8081:8080"
+    depends_on:
+      agent:
+        condition: service_started
+      payment-service:
+        condition: service_healthy
+    restart: unless-stopped
