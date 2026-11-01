@@ -17,17 +17,19 @@ from dotenv import load_dotenv
 if os.getenv("BDLF_NO_DOTENV") != "1":
     load_dotenv()
 
-from masumi import Config, MasumiAgentServer  # noqa: E402
+from masumi import Config  # noqa: E402
 
 from app.agent import input_schema, process_job  # noqa: E402
-from app import feedback, masumi_compat  # noqa: E402
+from app import feedback, ledger, masumi_compat  # noqa: E402
 from app.job_store import PostgresJobStorage, recover_jobs  # noqa: E402
+from app.logs import setup_logging  # noqa: E402
 from app.report import FOOTER  # noqa: E402
+from app.server import Health, ReliableAgentServer, add_admin_routes  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
 masumi_compat.install()
 
-logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+setup_logging()
 
 DEMO = {
     "input": {"company": "Example Labs", "role": "partnerships"},
@@ -41,12 +43,7 @@ DEMO = {
 }
 
 
-async def availability() -> dict:
-    name = "Crypto BD Lead Finder Pro" if Settings.from_env().is_pro else "Crypto BD Lead Finder"
-    return {"status": "available", "type": "masumi-agent", "message": f"{name} is operational"}
-
-
-def create_app(job_storage=None, feedback_store=None):
+def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=None):
     """Build the MIP-003 app plus the feedback pages. With AGENT_DATABASE_URL set, jobs and feedback
     survive restarts."""
     settings = Settings.from_env()
@@ -60,8 +57,19 @@ def create_app(job_storage=None, feedback_store=None):
     if feedback_store is None:
         feedback_store = feedback.PostgresFeedbackStore(dsn) if dsn else feedback.MemoryFeedbackStore()
     feedback.set_store(feedback_store)
+    if job_ledger is None:
+        job_ledger = ledger.PostgresLedger(dsn) if dsn else ledger.MemoryLedger()
+    ledger.set_ledger(job_ledger)
+    health = health or Health(os.getenv("PAYMENT_SERVICE_URL", ""))
+    name = "Crypto BD Lead Finder Pro" if settings.is_pro else "Crypto BD Lead Finder"
 
-    server = MasumiAgentServer(
+    async def availability() -> dict:
+        # The registry hides agents that report unavailable, so buyers cannot pay while we are degraded.
+        status, detail = await health.check()
+        message = f"{name} is operational" if status == "available" else f"{name} is degraded: {detail}"
+        return {"status": status, "type": "masumi-agent", "message": message}
+
+    server = ReliableAgentServer(
         config=config,
         agent_identifier=os.getenv("AGENT_IDENTIFIER"),
         network=os.getenv("NETWORK", "Preprod"),
@@ -71,9 +79,12 @@ def create_app(job_storage=None, feedback_store=None):
         availability_handler=availability,
         demo_handler=lambda: DEMO,
         seller_vkey=os.getenv("SELLER_VKEY"),
+        tier=settings.tier,
     )
     app = server.get_app()
-    feedback.add_feedback_routes(app, settings.feedback_secret, os.getenv("FEEDBACK_ADMIN_TOKEN", ""))
+    admin_token = os.getenv("ADMIN_TOKEN") or os.getenv("FEEDBACK_ADMIN_TOKEN", "")
+    feedback.add_feedback_routes(app, settings.feedback_secret, admin_token)
+    add_admin_routes(app, server, settings, admin_token)
     if not settings.feedback_secret:
         logging.getLogger(__name__).warning("FEEDBACK_SECRET not set: reports carry no feedback link")
 
@@ -90,8 +101,9 @@ def create_app(job_storage=None, feedback_store=None):
                     yield
             finally:
                 await job_storage.close()
-                if hasattr(feedback_store, "close"):
-                    await feedback_store.close()
+                for closable in (feedback_store, job_ledger):
+                    if hasattr(closable, "close"):
+                        await closable.close()
 
         app.router.lifespan_context = lifespan
     else:

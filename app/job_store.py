@@ -104,11 +104,36 @@ def _epoch_s(value: Any) -> Optional[float]:
     return v / 1000 if v > 1e11 else v
 
 
+# On-chain states after which the job must not run again.
+_RESULT_ON_CHAIN = {"ResultSubmitted", "Withdrawn", "Disputed", "DisputedWithdrawn"}
+_REFUNDED = {"RefundRequested", "RefundWithdrawn", "FundsOrDatumInvalid"}
+
+
+async def _on_chain_state(payment: V2Payment, payment_id: str) -> Optional[str]:
+    try:
+        data = (await payment.check_payment_status_by_identifier(payment_id)).get("data") or {}
+        return data.get("onChainState")
+    except Exception as e:
+        logger.warning("Could not read the on-chain state of %s...: %s", payment_id[:12], type(e).__name__)
+        return None
+
+
 async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -> dict:
-    """Re-attach payment monitoring for jobs left awaiting payment or running."""
+    """Bring unfinished jobs back after a restart.
+
+    - awaiting_payment: monitoring is re-attached; the job runs when the escrow is locked.
+    - running, result already on-chain (crash between submission and bookkeeping): marked completed
+      with the stored result, never run twice.
+    - running, refunded: marked failed.
+    - running, escrow still locked: runs again; the stored result (or treg's idempotency keys) keeps
+      the on-chain hash identical and avoids paying providers twice.
+    """
+    from .agent import _job_tag  # local import: agent imports this module's dependencies
+    from .ledger import get_ledger
+
     now = time.time() if now is None else now
     manager = server.job_manager
-    counts = {"resumed": 0, "expired": 0}
+    counts = {"resumed": 0, "expired": 0, "completed": 0, "refunded": 0}
     for status in (JobStatus.AWAITING_PAYMENT.value, JobStatus.RUNNING.value):
         for job in await manager.list_jobs(status):
             job_id, payment_id = job["job_id"], job.get("payment_id")
@@ -127,6 +152,25 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
                 network=server.network,
             )
             payment.payment_ids.add(payment_id)
+
+            if status == JobStatus.RUNNING.value:
+                state = await _on_chain_state(payment, payment_id)
+                if state in _RESULT_ON_CHAIN:
+                    tag = _job_tag(job["identifier_from_purchaser"], job.get("input_data") or {})
+                    stored = await get_ledger().get_result(tag)
+                    if stored is not None:
+                        await manager.storage.update_job(job_id, {"status": JobStatus.COMPLETED.value,
+                                                                  "result": stored})
+                    else:
+                        await manager.set_job_failed(job_id, "Result was submitted before the restart but is "
+                                                             "not stored locally")
+                    counts["completed"] += 1
+                    continue
+                if state in _REFUNDED:
+                    await manager.set_job_failed(job_id, f"Payment refunded while the agent was offline ({state})")
+                    counts["refunded"] += 1
+                    continue
+
             manager._payment_instances[job_id] = payment
 
             async def on_locked(_payment: Dict[str, Any], job_id=job_id, payment_id=payment_id):
@@ -134,6 +178,6 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
 
             await payment.start_status_monitoring(callback=on_locked)
             counts["resumed"] += 1
-    if counts["resumed"] or counts["expired"]:
+    if any(counts.values()):
         logger.info("Recovered jobs after restart: %s", counts)
     return counts

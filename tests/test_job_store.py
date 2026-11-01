@@ -66,7 +66,7 @@ async def test_restart_resumes_running_job_and_expires_stale_ones(env, payment_m
     # "Restart": a fresh server on the same storage.
     server = _server(storage)
     counts = await recover_jobs(server, now=now)
-    assert counts == {"resumed": 2, "expired": 1}
+    assert counts == {"resumed": 2, "expired": 1, "completed": 0, "refunded": 0}
     assert (await storage.get_job("stale-1"))["status"] == "failed"
     assert (await storage.get_job("done-1"))["result"] == "old"
     assert not treg.called  # nothing runs before escrow is confirmed again
@@ -86,7 +86,7 @@ async def test_recovery_ignores_jobs_without_payment_id(env, payment_mock):
     storage = InMemoryJobStorage()
     await storage.create_job("x", _job("x", "running", None, None, payment_id=None))
     counts = await recover_jobs(_server(storage))
-    assert counts == {"resumed": 0, "expired": 1}
+    assert counts == {"resumed": 0, "expired": 1, "completed": 0, "refunded": 0}
 
 
 class _FakePgStorage(PostgresJobStorage):
@@ -206,3 +206,30 @@ async def test_postgres_feedback_store():
         assert summary["responses"] >= 1 and summary["suppressed_people"] >= 1
     finally:
         await store.close()
+
+
+@requires_pg
+async def test_postgres_ledger():
+    import time as _t
+
+    from app.ledger import PostgresLedger
+
+    led = PostgresLedger(os.environ["TEST_DATABASE_URL"])
+    try:
+        pool = await led._p()
+        await pool.execute("DELETE FROM job_results WHERE tag LIKE 'test-%'")
+        await pool.execute("DELETE FROM job_costs WHERE tag LIKE 'test-%'")
+        await led.put_result("test-1", "standard", "R1")
+        await led.put_result("test-1", "standard", "R2")  # first result wins: same on-chain hash
+        assert await led.get_result("test-1") == "R1"
+        before = await led.spend_today()
+        now = _t.time()
+        row = {"tag": "test-1", "tier": "pro", "company": "Acme", "started_at": now - 2, "finished_at": now,
+               "duration_ms": 2000, "treg_usd": 0.05, "enrich_usd": 0.1, "leads": 3, "llm_used": True,
+               "outcome": "delivered", "price_tusdm": 1.05}
+        await led.record_job(row)
+        assert abs(await led.spend_today() - before - 0.15) < 1e-9
+        assert any(d["tier"] == "pro" for d in (await led.stats(1))["days"])
+        assert await led.ping()
+    finally:
+        await led.close()

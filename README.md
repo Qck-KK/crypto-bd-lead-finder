@@ -26,6 +26,18 @@ draft, and search notes. Each lead has exactly these fields:
 
 The report ends with the data source and the B2B-only notice. It never contains our costs.
 
+## Reliability
+
+| Area | What happens |
+|---|---|
+| Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. `deploy/backup.sh` dumps both databases (keeps 7). |
+| Idempotency | The result is stored under the job tag (purchaser identifier + input) before the SDK submits it on-chain. A re-run returns it unchanged: same on-chain hash, no provider paid twice. treg calls also carry idempotency keys. |
+| Recovery | On start: jobs awaiting payment get monitoring back; running jobs whose result is already on-chain are marked completed from the stored result (never resubmitted); refunded ones fail; locked ones run again. |
+| Payment acceptance | When the escrow is locked, the payment record is checked before any work: this agent, expected token, at least the registered price, this job's input hash. Otherwise the job fails and nothing is delivered. If the status cannot be read (3 tries), the job fails closed. |
+| Spend control | `DAILY_SPEND_CAP_USD` (default 1.0) caps paid provider spend per UTC day across all agents on the database (one treg balance); if the ledger cannot be read, paid providers stay off. |
+| Monitoring | `/availability` reports `unavailable` when the Payment Service or database is down (the registry then hides the agent). `/admin/stats` (JSON, ledger per agent) and `/metrics` (Prometheus text) need `x-admin-token`. Logs carry the job tag, `LOG_FORMAT=json` is available, and SDK lines with results or inputs are redacted. |
+| Launch checks | `scripts/preflight.py` (read-only, `--target Mainnet` for a readiness review), `scripts/acceptance.py` (paid end-to-end test, Preprod only), `MAINNET_CHECKLIST.md`. |
+
 ## Tiers, outreach, verification and feedback
 
 Two agents run from the same code and are registered separately (Masumi prices are fixed per registration):

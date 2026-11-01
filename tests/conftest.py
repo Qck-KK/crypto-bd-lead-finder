@@ -65,6 +65,26 @@ def _fresh_resolver_cache():
     clear_cache()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_ledger(monkeypatch):
+    from app import ledger
+
+    fresh = ledger.MemoryLedger()
+    ledger.set_ledger(fresh)
+    yield fresh
+    ledger.set_ledger(ledger.MemoryLedger())
+
+
+@pytest.fixture(autouse=True)
+def _healthy(monkeypatch):
+    from app.server import Health
+
+    async def check(self):
+        return ("available", "ok")
+
+    monkeypatch.setattr(Health, "check", check)
+
+
 @pytest.fixture
 def settings():
     return Settings(
@@ -96,8 +116,25 @@ def env(monkeypatch):
 
 @pytest.fixture
 def payment_mock(monkeypatch):
-    """Mocks the Masumi Payment Service calls. `callbacks` maps each monitored payment id to its callback."""
-    state = {"callback": None, "callbacks": {}, "submitted": None}
+    """Mocks the Masumi Payment Service calls. `callbacks` maps each monitored payment id to its callback.
+
+    `record` is what /payment/resolve-blockchain-identifier returns (a valid FundsLocked payment for
+    the test agent at the standard price); tests change it to simulate bad payments or other states.
+    """
+    from app.pricing import TUSDM_UNIT
+
+    state = {"callback": None, "callbacks": {}, "submitted": None, "status_calls": 0,
+             "record": {"onChainState": "FundsLocked", "agentIdentifier": "test-agent",
+                        "RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "270000"}]}}
+
+    async def check_payment_status_by_identifier(self, blockchain_identifier):
+        state["status_calls"] += 1
+        if isinstance(state["record"], Exception):
+            raise state["record"]
+        return {"status": "success", "data": {**state["record"], "blockchainIdentifier": blockchain_identifier}}
+
+    monkeypatch.setattr(masumi.server.Payment, "check_payment_status_by_identifier",
+                        check_payment_status_by_identifier)
 
     async def create_payment_request(self, metadata=None):
         return {"data": {"blockchainIdentifier": CHAIN_ID, "payByTime": "1700000000000",

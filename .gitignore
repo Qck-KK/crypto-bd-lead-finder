@@ -8,6 +8,9 @@ agent-pro.env
 *.vkey
 wallet*.json
 
+# Local handoff notes (machine-specific state)
+HANDOFF.md
+
 # Python
 __pycache__/
 *.py[cod]

@@ -1,0 +1,279 @@
+"""Idempotent re-runs, recovery, cost ledger and daily cap, payment acceptance, log redaction, admin stats."""
+
+import asyncio
+import dataclasses
+import json
+import logging
+import time
+
+import httpx
+import pytest
+import respx
+from masumi import Config, InMemoryJobStorage
+
+from app import drafts as drafts_module
+from app import ledger as ledger_module
+from app.agent import INPUT_SCHEMA, _job_tag, process_job
+from app.job_store import recover_jobs
+from app.logs import RedactFilter, job_tag_var
+from app.pricing import TUSDM_UNIT
+from app.server import ReliableAgentServer, check_payment
+from conftest import CHAIN_ID, FakeGemini
+
+APOLLO_URL = "https://treg.test/call/apollo.people.search"
+ROUTED_URL = "https://treg.test/call/treg.people.search"
+INPUT = {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}
+
+
+def _apollo(request):
+    body = json.loads(request.content)
+    if body["q_organization_domains_list"] != ["acme.io"]:
+        return httpx.Response(200, json={"people": []})
+    return httpx.Response(200, json={"people": [
+        {"id": "p1", "first_name": "Jane", "last_name_obfuscated": "S***h", "title": "Head of BD",
+         "organization": {"name": "Acme Labs"}}]})
+
+
+@pytest.fixture
+def gemini(monkeypatch):
+    monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
+
+
+# --- idempotency and ledger -----------------------------------------------------
+
+@respx.mock
+async def test_rerun_returns_stored_result_without_calling_providers(settings, gemini, _fresh_ledger):
+    apollo = respx.post(APOLLO_URL).mock(side_effect=_apollo)
+    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}},
+                                                                     headers={"X-Treg-Cost-Micro": "20000"}))
+    first = await process_job("buyer-1", INPUT, settings)
+    calls = apollo.call_count + routed.call_count
+    second = await process_job("buyer-1", INPUT, settings)
+    assert second == first
+    assert apollo.call_count + routed.call_count == calls  # nothing paid or fetched again
+
+    row = _fresh_ledger.jobs[_job_tag("buyer-1", INPUT)]
+    assert row["outcome"] == "delivered" and row["leads"] == 1 and row["treg_usd"] == pytest.approx(0.02)
+    assert row["price_tusdm"] == 0.27 and row["company"] == "Acme Labs"
+    assert await _fresh_ledger.spend_today() == pytest.approx(0.02)
+
+    other = await process_job("buyer-2", INPUT, settings)  # another purchaser runs fresh
+    assert apollo.call_count + routed.call_count > calls and other
+
+
+@respx.mock
+async def test_failed_job_is_recorded_and_not_cached(settings, gemini, _fresh_ledger):
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(500, json={}))
+    respx.post(ROUTED_URL).mock(return_value=httpx.Response(402, json={"error": "x"}, headers={"X-Treg-Error": "1"}))
+    with pytest.raises(Exception):
+        await process_job("buyer-f", INPUT, settings)
+    tag = _job_tag("buyer-f", INPUT)
+    assert _fresh_ledger.jobs[tag]["outcome"] == "failed"
+    assert await _fresh_ledger.get_result(tag) is None
+
+
+@respx.mock
+async def test_daily_cap_turns_paid_providers_off(settings, gemini, _fresh_ledger):
+    now = time.time()
+    await _fresh_ledger.record_job({"tag": "old", "tier": "standard", "company": "x", "started_at": now,
+                                    "finished_at": now, "duration_ms": 1, "treg_usd": 0.9, "enrich_usd": 0.1,
+                                    "leads": 1, "llm_used": True, "outcome": "delivered", "price_tusdm": 0.27})
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}))
+    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    result = await process_job("buyer-cap", INPUT, dataclasses.replace(settings, daily_spend_cap_usd=1.0))
+    assert not routed.called
+    assert "treg routed (domain) on acme.io: skipped" in result
+
+
+@respx.mock
+async def test_unreadable_ledger_keeps_paid_providers_off(settings, gemini, monkeypatch):
+    class Broken(ledger_module.MemoryLedger):
+        async def spend_today(self, now=None):
+            raise RuntimeError("db down")
+
+    ledger_module.set_ledger(Broken())
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}))
+    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    await process_job("buyer-x", INPUT, settings)
+    assert not routed.called
+
+
+async def test_ledger_stats_aggregate_by_day_and_tier(_fresh_ledger):
+    now = time.time()
+    for i, (tier, outcome, cost) in enumerate([("standard", "delivered", 0.0), ("standard", "empty", 0.05),
+                                               ("pro", "delivered", 0.26), ("pro", "failed", 0.0)]):
+        await _fresh_ledger.record_job({"tag": f"t{i}", "tier": tier, "company": "x", "started_at": now,
+                                        "finished_at": now, "duration_ms": 1000, "treg_usd": cost,
+                                        "enrich_usd": 0.0, "leads": 0 if outcome != "delivered" else 10,
+                                        "llm_used": True, "outcome": outcome,
+                                        "price_tusdm": 1.05 if tier == "pro" else 0.27})
+    s = await _fresh_ledger.stats(7)
+    pro = next(d for d in s["days"] if d["tier"] == "pro")
+    assert (pro["jobs"], pro["delivered"], pro["failed"], pro["revenue_tusdm"]) == (2, 1, 1, 1.05)
+    assert s["totals"] == {"jobs": 4, "cost_usd": 0.31, "revenue_tusdm": 1.59}
+    only_pro = await _fresh_ledger.stats(7, tier="pro")
+    assert only_pro["totals"] == {"jobs": 2, "cost_usd": 0.26, "revenue_tusdm": 1.05}
+
+
+# --- payment acceptance ---------------------------------------------------------
+
+def _record(**over):
+    base = {"blockchainIdentifier": "pid", "onChainState": "FundsLocked", "agentIdentifier": "agent-1",
+            "inputHash": "h1", "RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "270000"}]}
+    return {**base, **over}
+
+
+@pytest.mark.parametrize("over, problem", [
+    ({}, None),
+    ({"agentIdentifier": "agent-2"}, "another agent"),
+    ({"onChainState": "RefundRequested"}, "funds not locked"),
+    ({"inputHash": "h2"}, "input hash mismatch"),
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "100000"}]}, "below expected"),
+    ({"RequestedFunds": [{"unit": "", "amount": "270000000"}]}, "below expected"),  # ADA, not tUSDM
+    ({"blockchainIdentifier": "other"}, "payment id mismatch"),
+])
+def test_check_payment(over, problem):
+    problems = check_payment(_record(**over), job={"input_hash": "h1"}, agent_identifier="agent-1",
+                             payment_id="pid", unit=TUSDM_UNIT, min_amount=270000)
+    assert (problems == []) if problem is None else any(problem in p for p in problems)
+
+
+def _server(storage=None):
+    return ReliableAgentServer(
+        config=Config(payment_service_url="https://payment.test/api/v1", payment_api_key="k"),
+        agent_identifier="test-agent", network="Preprod", job_storage=storage or InMemoryJobStorage(),
+        start_job_handler=process_job, input_schema_handler=INPUT_SCHEMA, seller_vkey="test-vkey")
+
+
+async def _start(server):
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.get_app()), base_url="http://a") as c:
+        r = await c.post("/start_job", json={"identifier_from_purchaser": "abcdef1234567890", "input_data": INPUT})
+        assert r.status_code == 200, r.text
+        return r.json()["id"]
+
+
+@respx.mock(assert_all_called=False)
+async def test_bad_payment_is_rejected_before_any_work(env, payment_mock, gemini, respx_mock):
+    respx_mock.route(host="a").pass_through()
+    apollo = respx_mock.post(APOLLO_URL).mock(side_effect=_apollo)
+    payment_mock["record"]["RequestedFunds"] = [{"unit": TUSDM_UNIT, "amount": "1"}]
+    server = _server()
+    job_id = await _start(server)
+    await payment_mock["callback"]({"blockchainIdentifier": CHAIN_ID})
+    job = await server.job_manager.get_job(job_id)
+    assert job["status"] == "failed" and "payment rejected" in job["error"]
+    assert not apollo.called and payment_mock["submitted"] is None
+    assert server.counters == {"payments_accepted": 0, "payments_rejected": 1}
+
+
+@respx.mock(assert_all_called=False)
+async def test_unconfirmable_payment_fails_closed(env, payment_mock, gemini, respx_mock, monkeypatch):
+    respx_mock.route(host="a").pass_through()
+    apollo = respx_mock.post(APOLLO_URL).mock(side_effect=_apollo)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", no_sleep)
+    payment_mock["record"] = RuntimeError("payment service down")
+    server = _server()
+    job_id = await _start(server)
+    await payment_mock["callback"]({"blockchainIdentifier": CHAIN_ID})
+    assert (await server.job_manager.get_job(job_id))["status"] == "failed"
+    assert payment_mock["status_calls"] == 3 and not apollo.called
+
+
+@respx.mock(assert_all_called=False)
+async def test_good_payment_runs_and_delivers(env, payment_mock, gemini, respx_mock):
+    respx_mock.route(host="a").pass_through()
+    respx_mock.post(APOLLO_URL).mock(side_effect=_apollo)
+    respx_mock.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    server = _server()
+    job_id = await _start(server)
+    await payment_mock["callback"]({"blockchainIdentifier": CHAIN_ID})
+    for _ in range(100):
+        job = await server.job_manager.get_job(job_id)
+        if job["status"] in ("completed", "failed"):
+            break
+        await asyncio.sleep(0.02)
+    assert job["status"] == "completed" and payment_mock["submitted"][1] == job["result"]
+    assert server.counters["payments_accepted"] == 1
+
+
+# --- recovery of half-finished jobs ---------------------------------------------
+
+def _running_job(job_id, input_data=INPUT):
+    future = int((time.time() + 3600) * 1000)
+    return {"job_id": job_id, "status": "running", "payment_id": f"pay-{job_id}",
+            "identifier_from_purchaser": "abcdef1234567890", "input_data": input_data, "pay_by_time": future,
+            "submit_result_time": future, "agent_identifier": "test-agent", "seller_vkey": "v", "input_hash": "h",
+            "result": None, "error": None}
+
+
+async def test_recovery_completes_jobs_whose_result_is_already_on_chain(env, payment_mock, _fresh_ledger):
+    storage = InMemoryJobStorage()
+    await storage.create_job("j1", _running_job("j1"))
+    await _fresh_ledger.put_result(_job_tag("abcdef1234567890", INPUT), "standard", "THE RESULT")
+    payment_mock["record"] = {"onChainState": "ResultSubmitted"}
+    counts = await recover_jobs(_server(storage))
+    job = await storage.get_job("j1")
+    assert counts["completed"] == 1 and job["status"] == "completed" and job["result"] == "THE RESULT"
+    assert payment_mock["submitted"] is None and "pay-j1" not in payment_mock["callbacks"]  # not resubmitted
+
+
+async def test_recovery_fails_refunded_and_unrecoverable_jobs(env, payment_mock, _fresh_ledger):
+    storage = InMemoryJobStorage()
+    await storage.create_job("j2", _running_job("j2"))
+    payment_mock["record"] = {"onChainState": "RefundWithdrawn"}
+    counts = await recover_jobs(_server(storage))
+    assert counts["refunded"] == 1 and (await storage.get_job("j2"))["status"] == "failed"
+
+    storage = InMemoryJobStorage()
+    await storage.create_job("j3", _running_job("j3", {"company": "Other"}))
+    payment_mock["record"] = {"onChainState": "ResultSubmitted"}
+    await recover_jobs(_server(storage))
+    assert "not stored locally" in (await storage.get_job("j3"))["error"]
+
+
+# --- logs, availability, admin --------------------------------------------------
+
+def test_redaction_and_job_tag():
+    token = job_tag_var.set("tag123")
+    try:
+        rec = logging.LogRecord("root", logging.INFO, __file__, 1, "Escaped Output for hashing: # BD leads Jane Doe",
+                                None, None)
+        RedactFilter().filter(rec)
+        assert rec.getMessage() == "Escaped Output for hashing: [redacted]" and rec.job == "tag123"
+        rec2 = logging.LogRecord("masumi.server", logging.INFO, __file__, 1, "Input data for job %s: %s",
+                                 ("j1", {"company": "Acme"}), None)
+        RedactFilter().filter(rec2)
+        assert "Acme" not in rec2.getMessage()
+    finally:
+        job_tag_var.reset(token)
+
+
+async def test_degraded_dependencies_report_unavailable(env, payment_mock):
+    from main import create_app
+
+    class Down:
+        async def check(self):
+            return ("unavailable", "payment service unreachable")
+
+    app = create_app(health=Down())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://a") as c:
+        body = (await c.get("/availability")).json()
+    assert body["status"] == "unavailable" and "payment service unreachable" in body["message"]
+
+
+async def test_admin_stats_and_metrics_need_the_token(env, payment_mock, monkeypatch):
+    monkeypatch.setenv("ADMIN_TOKEN", "adm-1")
+    from main import create_app
+
+    app = create_app()
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://a") as c:
+        assert (await c.get("/admin/stats")).status_code == 403
+        assert (await c.get("/metrics", headers={"x-admin-token": "wrong"})).status_code == 403
+        stats = (await c.get("/admin/stats", headers={"x-admin-token": "adm-1"})).json()
+        metrics = (await c.get("/metrics", headers={"x-admin-token": "adm-1"})).text
+    assert stats["tier"] == "standard" and stats["daily_spend_cap_usd"] == 1.0 and "ledger" in stats
+    assert 'bdlf_spend_today_usd{tier="standard"}' in metrics and "bdlf_payments_total" in metrics

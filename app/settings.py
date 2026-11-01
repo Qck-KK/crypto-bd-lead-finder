@@ -41,6 +41,9 @@ class Settings:
     # Feedback links: HMAC secret and the public URL buyers open.
     feedback_secret: str = ""
     public_url: str = ""
+    # Circuit breaker: paid provider spend (router + enrichment) per UTC day, summed over every agent
+    # that shares the database (they draw on the same treg balance).
+    daily_spend_cap_usd: float = 1.0
 
     @property
     def is_pro(self) -> bool:
@@ -64,4 +67,5 @@ class Settings:
             enrich_budget_usd=_float("ENRICH_BUDGET_USD", 0.30),
             feedback_secret=os.getenv("FEEDBACK_SECRET", ""),
             public_url=os.getenv("AGENT_PUBLIC_URL", "").rstrip("/"),
+            daily_spend_cap_usd=_float("DAILY_SPEND_CAP_USD", 1.0),
         )
