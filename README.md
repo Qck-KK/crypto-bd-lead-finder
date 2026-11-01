@@ -109,7 +109,7 @@ Service; when funds are locked in escrow it runs the job and submits the result 
 | Item | Per job |
 |---|---|
 | treg people search: 10 rows × ~$0.0089 | ~$0.089 |
-| Gemini 2.5 Flash (free tier) | $0 |
+| Gemini (`GEMINI_MODEL`, free tier) | $0 |
 | **Cost** | **~$0.089** |
 | **Preprod price (×3, rounded up)** | **0.27 tUSDM** |
 
@@ -172,17 +172,19 @@ paying twice for the same search), and jobs whose deadline passed while offline 
 ## Deploy on a server (Docker Compose)
 
 `deploy/docker-compose.yml` runs PostgreSQL, the Masumi Payment Service (0.29.0, as in the official
-quickstart) and the agent on one host, all with `restart: unless-stopped`.
+quickstart), the standard agent (`agent`, port 8080) and the Pro agent (`agent-pro`, port 8081) on one host,
+all with `restart: unless-stopped`.
 
 ```bash
 cd deploy
 cp .env.example .env              # POSTGRES_PASSWORD, ENCRYPTION_KEY, ADMIN_KEY (openssl rand -hex 32), Blockfrost key
 cp agent.env.example agent.env    # TREG_TOKEN, GEMINI_API_KEY; PAYMENT_API_KEY and SELLER_VKEY after seeding
+cp agent.env.example agent-pro.env  # same keys, the Pro AGENT_IDENTIFIER and AGENT_PUBLIC_URL, ENRICH_BUDGET_USD=0
 docker compose up -d --build
 docker compose logs payment-setup  # the generated wallet mnemonics are printed here once: store them offline
 ```
 
-Only port 8080 (the agent) should be reachable from the internet; put HTTPS in front of it. The
+Only the agent ports (8080 standard, 8081 Pro) should be reachable from the internet; put HTTPS in front of them. The
 Payment Service binds to `127.0.0.1:3001`; reach the admin with
 `ssh -L 3001:localhost:3001 <server>` and open `http://localhost:3001/admin`.
 
@@ -249,8 +251,9 @@ Search order:
    (with BD, partnerships and recruiting synonyms) and checked again locally; closest titles come first.
    Apollo's free search masks last names (`Jane S***h`) and has no profile links, so these leads point to
    the company website.
-2. **Routed treg search** only if Apollo finds nobody. With a domain only `company_domain` is sent, so only
-   providers that search by domain can answer; the role is matched locally.
+2. **Routed treg search** only if fewer than `MIN_LEADS_BEFORE_PAID` (default 5) leads reach `MIN_LEAD_SCORE`:
+   first by domain, then by name if the domain was not confirmed. With a domain only `company_domain` is sent,
+   so only providers that search by domain can answer; the role is matched locally.
 
 **Enter the company domain** (the input form marks it as recommended). Without it the search relies on the
 domain guesses and on name search, and results can be few or empty after the company filter.

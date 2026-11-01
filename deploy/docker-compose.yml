@@ -3,7 +3,7 @@
 #   cd deploy && cp .env.example .env && cp agent.env.example agent.env   # fill in, see README
 #   docker compose up -d --build
 #
-# Only the agent (8080) is meant to be public. The Payment Service listens on 127.0.0.1:3001;
+# Only the agents (8080 standard, 8081 Pro) are meant to be public. The Payment Service listens on 127.0.0.1:3001;
 # open its admin through an SSH port forward. Payment Service services follow the official
 # masumi-services-dev-quickstart (release 0.29.0).
 
