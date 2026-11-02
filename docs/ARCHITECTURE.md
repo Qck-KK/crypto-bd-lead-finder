@@ -19,6 +19,13 @@ the result hash.
   escrowed funds.
 - The standard agent runs in another container and cannot see Pro's configuration, so it makes no Pro claims.
 
+## Lead quality (BL-02, BL-03)
+- `app/scoring.py` is the only place that turns a lead into a score and label: `score_parts` (points and
+  reasons per component) and `rate` (label, with the identifiability cap). The router, the enrichment rescoring
+  and `apply_verification` all go through `rate`, so the cap cannot be bypassed by a later score change.
+- "Identifiable" = full name or individual LinkedIn profile; without either a lead is never High.
+- `profile_type` is derived in the report from `profile_url`; the compliance allowlist is unchanged.
+
 ## Money safety
 - Paid provider calls: per-call max cost header, per-job budget, daily cap across both agents (shared ledger).
 - Paid enrichment stays off on Preprod by default: test-token buyers must not spend real treg balance.

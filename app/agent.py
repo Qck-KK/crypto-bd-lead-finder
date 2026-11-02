@@ -17,7 +17,7 @@ from .pricing import estimate
 from .report import FOOTER, build_result
 from .resolver import resolve_company
 from .router import find_leads, person_hash, public_view
-from .scoring import quality_label, score_lead
+from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
 from .treg_client import search_apollo
 from .verify import apply_verification, verify_lead
@@ -262,8 +262,7 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
                 enrichment.update(enriched=done["enriched"], status=done["error"] or "ok")
         for lead in leads:
             if lead.get("_signals", {}).get("enriched"):
-                score, reasons = score_lead(public_view(lead), role, lead["_signals"].get("evidence", "none"))
-                lead.update(quality_score=score, quality=quality_label(score), match_reasons=reasons)
+                rate(lead, *score_parts(public_view(lead), role, lead["_signals"].get("evidence", "none")))
 
     for lead in leads:
         apply_verification(lead, verify_lead(lead, resolved.domain, resolved.verified))

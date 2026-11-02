@@ -8,8 +8,10 @@ import respx
 
 from app.resolver import candidate_domains, registrable_root, resolve_company
 from app.router import find_leads, person_key
-from app.scoring import quality_label, score_lead, seniority
+from app.report import build_result
+from app.scoring import CAP_REASON, quality_label, rate, score_lead, score_parts, seniority
 from app.treg_client import TregError
+from app.verify import apply_verification, verify_lead
 
 APOLLO_URL = "https://treg.test/call/apollo.people.search"
 ROUTED_URL = "https://treg.test/call/treg.people.search"
@@ -79,6 +81,59 @@ def test_scores_reward_role_fit_seniority_full_name_and_linkedin():
 
     untitled, _ = score_lead(_lead("Jo Bloggs", "", "https://acme.io"), None, "none")
     assert untitled < 30 and quality_label(untitled) == "Low"
+
+
+def test_breakdown_adds_up_and_every_component_has_a_reason():
+    score, reasons, parts = score_parts(_lead("Jane S***h", "Head of BD", "https://acme.io"), "BD", "domain")
+    assert parts == {"role": 35, "seniority": 20, "name": 5, "profile": 6, "company": 10}
+    assert score == sum(parts.values()) == 76
+    assert {"title matches 'BD'", "senior role", "last name masked by the provider",
+            "no individual profile (company website only)", "company confirmed by domain"} <= set(reasons)
+    _, reasons, _ = score_parts(_lead(url=""), None, "none")
+    assert "full name" in reasons and "no profile link" in reasons
+
+
+@pytest.mark.parametrize("name, url, label", [
+    ("Jane S***h", "https://acme.io", "Medium"),                       # masked, company site: capped
+    ("Jane S***h", "", "Medium"),                                      # masked, no link: capped
+    ("Jane S***h", "https://www.linkedin.com/in/jane", "High"),        # masked but own profile
+    ("Jane Smith", "https://acme.io", "High"),                         # full name, no profile
+    ("Jane Smith", "https://www.linkedin.com/in/jane", "High")])
+def test_unidentifiable_leads_are_never_high(name, url, label):
+    lead = _lead(name, "Head of Business Development", url)
+    score, reasons, parts = score_parts(lead, "business development", "domain")
+    assert score >= 70
+    rate(lead, score, reasons, parts)
+    assert lead["quality"] == label and lead["quality_score"] == score
+    assert (CAP_REASON in lead["match_reasons"]) == (label == "Medium")
+
+
+def test_cap_survives_verification_without_duplicate_reasons():
+    lead = _lead("Jane S***h", "Head of Business Development", "https://acme.io")
+    rate(lead, *score_parts(lead, "business development", "domain"))
+    lead["_signals"] = {"providers": ["apollo"], "evidence": "domain", "refreshed_at": "2026-10-01T00:00:00Z"}
+    apply_verification(lead, verify_lead(lead, "acme.io", True))
+    assert lead["verification"]["status"] == "Verified" and lead["quality_score"] == 81
+    assert lead["quality"] == "Medium" and lead["match_reasons"].count(CAP_REASON) == 1
+    assert lead["score_breakdown"]["employment_check"] == 5
+
+
+def test_report_separates_individual_profiles_from_company_sites():
+    leads = []
+    for name, url in (("Jane S***h", "https://acme.io"), ("Max Mustermann", "https://www.linkedin.com/in/max"),
+                      ("Ann S***e", "")):
+        lead = _lead(name, "Head of BD", url)
+        rate(lead, *score_parts(lead, "BD", "domain"))
+        leads.append(lead)
+    result = build_result("Acme", "BD", leads, ["Hi"] * 3)
+    data = __import__("json").loads(result.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert [lead["profile_type"] for lead in data["leads"]] == ["company_website", "linkedin", "none"]
+    assert data["summary"]["with_linkedin"] == 1 and data["summary"]["with_full_name"] == 1
+    assert "**Identifiable:** 1 of 3 with a full name · 1 of 3 with an individual LinkedIn profile" in result
+    assert "- **Profile:** company site only: [acme.io](https://acme.io)" in result
+    assert "- **Profile:** [LinkedIn](https://www.linkedin.com/in/max)" in result
+    assert "*Company site only* means" in result and "| Employment |" in result
+    assert "- **Points:** role 35 · seniority 20 · name 5 · profile 6 · company 10" in result
 
 
 def test_seniority_levels():

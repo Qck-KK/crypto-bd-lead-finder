@@ -20,8 +20,9 @@ draft, and search notes. Each lead has exactly these fields:
 | `title` | Job title |
 | `company` | Company |
 | `profile_url` | Public LinkedIn profile (`linkedin.com/in/…`) or the company's own website |
+| `profile_type` | `linkedin`, `company_website` (no individual profile found) or `none`; the report says "company site only" |
 | `source` | `treg.to (<provider>)` |
-| `quality_score`, `quality`, `match_reasons` | 0–100 score, High/Medium/Low, and why (see below) |
+| `quality_score`, `quality`, `match_reasons`, `score_breakdown` | 0–100 score, High/Medium/Low, why, and the points per component (see below) |
 | `outreach_draft` | 50–90 word English draft |
 
 The report ends with the data source and the B2B-only notice. It never contains our costs.
@@ -77,7 +78,7 @@ Two agents run from the same code and are registered separately (Masumi prices a
 | Domain resolver | `app/resolver.py` | Given domain, its root (`careers.chain.link` → `chain.link`), then guesses from the name. Each is checked with a free Apollo probe and accepted only if the people there work at a company with the same name. Cached for 24 h. |
 | Provider router | `app/router.py` | Apollo people search (free) on the resolved domain. Paid routed treg search only if fewer than `MIN_LEADS_BEFORE_PAID` leads: by domain, then by name if the domain was not confirmed. Total spend per job ≤ `TREG_JOB_BUDGET_USD`. If every provider fails, the job fails (so the buyer can be refunded) instead of delivering nothing. |
 | Compliance filter | `app/compliance.py` | Allowlisted fields only; wrong-company and off-role people dropped. |
-| Quality score | `app/scoring.py` | Role fit (35), seniority (20), full name (15), LinkedIn (20) or company site (6), company evidence (10). High ≥ 70, Medium ≥ 45. Leads below `MIN_LEAD_SCORE` (35) are not delivered. The same person from two providers is merged, keeping the better record. |
+| Quality score | `app/scoring.py` | Role fit (35), seniority (20), full name (15), LinkedIn (20) or company site (6), company evidence (10). High ≥ 70, Medium ≥ 45; a lead with a masked name and no individual profile is never High. The report's summary counts full names and LinkedIn profiles, and "Employment check" (was "Verification") names what is checked. Leads below `MIN_LEAD_SCORE` (35) are not delivered. The same person from two providers is merged, keeping the better record. |
 
 ## Data compliance
 

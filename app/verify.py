@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .compliance import is_linkedin_profile, normalize_domain
-from .scoring import quality_label
+from .scoring import rate
 
 FRESH_DAYS = 365
 # Providers whose search only returns people currently employed at the searched company.
@@ -78,6 +78,6 @@ def verify_lead(lead: dict, resolved_domain: Optional[str], verified_domain: boo
 def apply_verification(lead: dict, verification: dict) -> None:
     """Attach the verification and adjust the score: +5 Verified, -5 Unverified."""
     delta = {"Verified": 5, "Unverified": -5}.get(verification["status"], 0)
-    lead["quality_score"] = max(0, min(100, lead["quality_score"] + delta))
-    lead["quality"] = quality_label(lead["quality_score"])
+    rate(lead, max(0, min(100, lead["quality_score"] + delta)), lead.get("match_reasons") or [],
+         {**(lead.get("score_breakdown") or {}), "employment_check": delta})
     lead["verification"] = verification

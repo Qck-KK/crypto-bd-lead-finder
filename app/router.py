@@ -18,7 +18,7 @@ from typing import Optional
 
 from .compliance import filter_people, role_terms, row_signals
 from .resolver import ResolvedCompany
-from .scoring import quality_label, score_lead
+from .scoring import rate, score_parts
 from .settings import Settings
 from .treg_client import TregError, search_apollo, search_people
 
@@ -78,10 +78,10 @@ class _Pool:
             if person_hash(lead) in self.suppressed:
                 self.suppressed_hits += 1
                 continue
-            score, reasons = score_lead(lead, self.role, evidence)
+            score, reasons, parts = score_parts(lead, self.role, evidence)
             signals = {**row_signals(row), "providers": [provider or "?"], "evidence": evidence}
-            scored = {**lead, "quality_score": score, "quality": quality_label(score), "match_reasons": reasons,
-                      "_signals": signals}
+            scored = {**lead, "_signals": signals}
+            rate(scored, score, reasons, parts)
             key = person_key(lead)
             old = self.by_person.get(key)
             if old:

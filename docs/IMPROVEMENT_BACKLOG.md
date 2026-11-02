@@ -101,7 +101,13 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   budget set, a mocked Pro job enriches masked leads and the result shows the gain. Tests cover both.
 
 ### BL-02 Quality score and verification rate unusable leads as High / Verified
-- **Phase:** 1 · **Severity:** High · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** High · **Effort:** S · **Status:** Fixed in code (iteration 2, 2026-11-02; not deployed)
+- **Resolution (iteration 2):** `app/scoring.py` `score_parts` returns points per component and a reason for each
+  (incl. "full name", "no individual profile (company website only)", "no profile link"); `rate()` caps the label
+  at Medium when the name is masked and there is no individual LinkedIn profile, with the reason "rated at most
+  Medium: …". The cap is re-applied after verification (`app/verify.py`), which adds `employment_check` ±5 to the
+  breakdown. The report calls the check "Employment check" and lists the points per lead. Effect on the live
+  Coinbase Pro sample: its 8 High leads (all masked, no LinkedIn) would be Medium. Tests: `tests/test_quality.py`.
 - **Description:** A masked lead with only the company homepage scores 81/100 (High) and is "Verified".
 - **Evidence:** `app/scoring.py:52-82`: exact role 35 + senior 20 + masked name 5 + company site 6 + domain 10
   = 76, `app/verify.py:59-60,80` adds +5 for Verified (employer + current + fresh — nothing about reachability).
@@ -119,7 +125,11 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   unit tests for the boundary cases; report wording updated.
 
 ### BL-03 "Profile" is the company homepage, presented as a person's profile
-- **Phase:** 1 · **Severity:** High · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** High · **Effort:** S · **Status:** Fixed in code (iteration 2, 2026-11-02; not deployed)
+- **Resolution (iteration 2):** each lead in the JSON has `profile_type` (`linkedin` / `company_website` / `none`);
+  the report shows "company site only: …" instead of a bare link, explains it under "How to use", and the summary
+  has an **Identifiable** line (`n of m with a full name · n of m with an individual LinkedIn profile`, also
+  `with_full_name` / `with_linkedin` in the JSON summary). The allowlisted fields are unchanged.
 - **Description:** When there is no individual profile, `profile_url` falls back to `https://<company domain>`
   and the report lists it under **Profile**.
 - **Evidence:** `app/compliance.py:123-124`; `app/report.py:51,91,108`; live results: 13/13 leads have the
@@ -347,9 +357,11 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 
 | # | Date | Issue | Result |
 |---|---|---|---|
-| 1 | 2026-11-02 | BL-01 | Fixed in code; 112 tests pass (incl. PostgreSQL). Not deployed. |
+| 1 | 2026-11-02 | BL-01 | Fixed in code (`f255fc7`); 112 tests pass (incl. PostgreSQL). Not deployed. |
+| 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code; 120 tests pass (incl. PostgreSQL). Not deployed. |
 
 ## Recommended next iteration (Step C)
 
-BL-02 + BL-03 together (honest quality labels and profile links: one scoring/report change, same tests),
-then BL-08 (payment amount guarantee).
+BL-08 (payment amount guarantee): establish from the Payment Service 0.29 source what `FundsLocked`
+guarantees about amount and asset, reject records missing `blockchainIdentifier` / `inputHash`, and correct
+the README claim. Then BL-09 (recovery during result submission).

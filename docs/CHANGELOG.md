@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Iteration 2 — BL-02 + BL-03: honest quality labels and profile links (2026-11-02)
+- A lead with a masked name and no individual LinkedIn profile is rated at most Medium (reason stated).
+- Every lead carries `score_breakdown` (points per component, incl. the employment check ±5) and a reason
+  for every component; the report lists the points.
+- `profile_type` per lead (`linkedin` / `company_website` / `none`); the report says "company site only"
+  instead of presenting the company homepage as a profile, and its summary counts full names and LinkedIn
+  profiles ("Identifiable").
+- "Verification" is now labelled "Employment check" in the report (status values unchanged).
+
 ### Iteration 1 — BL-01: Pro is only sold with enrichment on (2026-11-02)
 - Enrichment is off unless `ENRICH_BUDGET_USD` covers at least one match (~$0.026); the default is now 0
   (was 0.30 when unset).

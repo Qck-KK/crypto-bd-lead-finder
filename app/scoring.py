@@ -8,7 +8,9 @@
 | Profile link      | 20 LinkedIn profile, 6 company website, 0 none                |
 | Company evidence  | 10 matched by domain, 6 by name, 0 none                        |
 
-High >= 70, Medium >= 45, otherwise Low.
+High >= 70, Medium >= 45, otherwise Low. A lead the buyer cannot identify (masked name and no individual
+profile) is rated at most Medium, whatever its score. Each lead carries its points per component
+(`score_breakdown`) and the reasons.
 """
 
 import re
@@ -34,51 +36,77 @@ def seniority(title: str) -> str:
     return "other"
 
 
+CAP_REASON = "rated at most Medium: masked name and no individual profile"
+
+
 def quality_label(score: int) -> str:
     return "High" if score >= 70 else "Medium" if score >= 45 else "Low"
 
 
-def score_lead(lead: dict, role: Optional[str], company_evidence: str) -> tuple[int, list[str]]:
-    """company_evidence: "domain", "name" or "none"."""
+def is_identifiable(lead: dict) -> bool:
+    """The buyer can tell who this is: a full name or an individual LinkedIn profile."""
+    return "*" not in lead.get("name", "") or is_linkedin_profile(lead.get("profile_url") or "")
+
+
+def rate(lead: dict, score: int, reasons: list[str], breakdown: dict) -> None:
+    """Set score, label, reasons and breakdown on a lead; unidentifiable leads are never High."""
+    reasons = [r for r in reasons if r != CAP_REASON]
+    label = quality_label(score)
+    if label == "High" and not is_identifiable(lead):
+        label = "Medium"
+        reasons.append(CAP_REASON)
+    lead.update(quality_score=score, quality=label, match_reasons=reasons, score_breakdown=breakdown)
+
+
+def score_parts(lead: dict, role: Optional[str], company_evidence: str) -> tuple[int, list[str], dict]:
+    """(score, reasons, points per component). company_evidence: "domain", "name" or "none"."""
     reasons: list[str] = []
-    score = 0
+    parts = {"role": 0, "seniority": 0, "name": 0, "profile": 0, "company": 0}
     title = lead.get("title") or ""
 
     if not title:
         reasons.append("no job title")
     elif not role:
-        score += 25
+        parts["role"] = 25
     else:
         rank = role_rank(title, role)
         if rank == 0:
-            score += 35
+            parts["role"] = 35
             reasons.append(f"title matches '{role}'")
         elif rank is not None:
-            score += 22
+            parts["role"] = 22
             reasons.append(f"title is related to '{role}'")
 
     if title:
         level = seniority(title)
-        score += {"senior": 20, "mid": 12, "other": 5}[level]
+        parts["seniority"] = {"senior": 20, "mid": 12, "other": 5}[level]
         if level == "senior":
             reasons.append("senior role")
 
     if "*" in lead.get("name", ""):
-        score += 5
+        parts["name"] = 5
         reasons.append("last name masked by the provider")
     else:
-        score += 15
+        parts["name"] = 15
+        reasons.append("full name")
 
     url = lead.get("profile_url") or ""
     if is_linkedin_profile(url):
-        score += 20
+        parts["profile"] = 20
         reasons.append("LinkedIn profile")
     elif url:
-        score += 6
-        reasons.append("company website only")
+        parts["profile"] = 6
+        reasons.append("no individual profile (company website only)")
+    else:
+        reasons.append("no profile link")
 
-    score += {"domain": 10, "name": 6}.get(company_evidence, 0)
+    parts["company"] = {"domain": 10, "name": 6}.get(company_evidence, 0)
     if company_evidence == "domain":
         reasons.append("company confirmed by domain")
 
-    return min(score, 100), reasons
+    return min(sum(parts.values()), 100), reasons, parts
+
+
+def score_lead(lead: dict, role: Optional[str], company_evidence: str) -> tuple[int, list[str]]:
+    score, reasons, _ = score_parts(lead, role, company_evidence)
+    return score, reasons

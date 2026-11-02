@@ -8,6 +8,7 @@ import json
 from collections import Counter
 from typing import Optional
 
+from .compliance import is_linkedin_profile
 from .settings import DATA_SOURCE, USAGE_NOTICE
 
 FOOTER = f"Data source: {DATA_SOURCE}. {USAGE_NOTICE}"
@@ -16,6 +17,11 @@ FOOTER = f"Data source: {DATA_SOURCE}. {USAGE_NOTICE}"
 def _outreach(item) -> dict:
     # Plain strings are accepted for callers that only have an email draft.
     return item if isinstance(item, dict) else {"subject": "", "email": item, "linkedin_note": ""}
+
+
+def profile_type(url: str) -> str:
+    """What profile_url points to: the person's LinkedIn, only the company website, or nothing."""
+    return "linkedin" if is_linkedin_profile(url or "") else "company_website" if url else "none"
 
 
 def build_payload(company: str, role: Optional[str], leads: list[dict], drafts: list,
@@ -30,10 +36,12 @@ def build_payload(company: str, role: Optional[str], leads: list[dict], drafts: 
         "resolution": resolution or {},
         "summary": {"delivered": len(leads), "high": labels["High"], "medium": labels["Medium"],
                     "low": labels["Low"], "verified": verified["Verified"], "likely": verified["Likely"],
+                    "with_linkedin": sum(profile_type(lead.get("profile_url")) == "linkedin" for lead in leads),
+                    "with_full_name": sum("*" not in lead["name"] for lead in leads),
                     "filtered_low_quality": dropped_low_score, "suppressed_by_feedback": suppressed},
         "count": len(leads),
-        "leads": [{**lead, "outreach": _outreach(d), "outreach_draft": _outreach(d)["email"]}
-                  for lead, d in zip(leads, drafts)],
+        "leads": [{**lead, "profile_type": profile_type(lead.get("profile_url")), "outreach": _outreach(d),
+                   "outreach_draft": _outreach(d)["email"]} for lead, d in zip(leads, drafts)],
         "search": search or [],
         "enrichment": enrichment,
         "feedback_url": feedback_url,
@@ -47,10 +55,12 @@ def _md(text: str) -> str:
 
 
 def _link(url: str) -> str:
-    if not url:
+    kind = profile_type(url)
+    if kind == "none":
         return "n/a"
-    label = "LinkedIn" if "linkedin.com/in/" in url else url.split("://", 1)[-1]
-    return f"[{_md(label)}]({url})"
+    if kind == "linkedin":
+        return f"[LinkedIn]({url})"
+    return f"company site only: [{_md(url.split('://', 1)[-1])}]({url})"
 
 
 def enrichment_text(e: dict) -> str:
@@ -80,9 +90,14 @@ def render_markdown(payload: dict) -> str:
         lines.append(f"- **Company domain:** {_md(domain)} ({state})")
     lines.append(f"- **Leads delivered:** {summary['delivered']} "
                  f"(High {summary['high']} · Medium {summary['medium']} · Low {summary['low']})")
+    if leads:
+        n = summary["delivered"]
+        lines.append(f"- **Identifiable:** {summary.get('with_full_name', 0)} of {n} with a full name · "
+                     f"{summary.get('with_linkedin', 0)} of {n} with an individual LinkedIn profile")
     if leads and "verification" in leads[0]:
-        lines.append(f"- **Verification:** {summary.get('verified', 0)} verified · {summary.get('likely', 0)} likely "
-                     f"· {summary['delivered'] - summary.get('verified', 0) - summary.get('likely', 0)} unverified")
+        lines.append(f"- **Employment check:** {summary.get('verified', 0)} verified · {summary.get('likely', 0)} "
+                     f"likely · {summary['delivered'] - summary.get('verified', 0) - summary.get('likely', 0)} "
+                     "unverified (employer, current role, data freshness)")
     if payload.get("enrichment") and leads:
         lines.append(f"- **Enrichment:** {_md(enrichment_text(payload['enrichment']))}")
     if payload.get("feedback_url"):
@@ -100,7 +115,7 @@ def render_markdown(payload: dict) -> str:
             "",
         ]
     else:
-        lines += ["## Overview", "", "| # | Name | Title | Quality | Verified | Profile |",
+        lines += ["## Overview", "", "| # | Name | Title | Quality | Employment | Profile |",
                   "|---|---|---|---|---|---|"]
         for i, lead in enumerate(leads, 1):
             status = (lead.get("verification") or {}).get("status", "n/a")
@@ -111,6 +126,9 @@ def render_markdown(payload: dict) -> str:
         if any("*" in lead["name"] for lead in leads):
             lines.append("- Names with `***` are partly masked by the data provider. Search LinkedIn for the first "
                          "name, title and company to find the person.")
+        if any(profile_type(lead["profile_url"]) != "linkedin" for lead in leads):
+            lines.append("- *Company site only* means the data has no individual profile for that person; the link "
+                         "goes to the company's website, not to the person.")
         lines += [
             "- Check the person's current role before you reach out; public data can be out of date.",
             "- The drafts are starting points: add one specific, verifiable reason for contacting this person.",
@@ -127,9 +145,13 @@ def render_markdown(payload: dict) -> str:
             if "quality_score" in lead:
                 why = "; ".join(lead.get("match_reasons") or [])
                 lines.append(f"- **Quality:** {lead['quality_score']}/100 ({lead['quality']})" + (f": {why}" if why else ""))
+            if lead.get("score_breakdown"):
+                lines.append("- **Points:** " + " · ".join(f"{k.replace('_', ' ')} {v:+d}" if k == "employment_check"
+                                                          else f"{k} {v}" for k, v in lead["score_breakdown"].items()))
             if lead.get("verification"):
                 v = lead["verification"]
-                lines.append(f"- **Verification:** {v['status']}" + (f" ({'; '.join(v['notes'])})" if v["notes"] else ""))
+                lines.append(f"- **Employment check:** {v['status']}"
+                             + (f" ({'; '.join(v['notes'])})" if v["notes"] else ""))
             lines.append(f"- **Source:** {_md(lead['source'])}")
             lines.append("")
             o = lead["outreach"]

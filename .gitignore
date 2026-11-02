@@ -24,3 +24,5 @@ pgdata/
 deploy/data/
 masumi-payment-service/
 *.log
+run_loop.sh
+logs/

@@ -41,8 +41,9 @@ async def test_full_job_output(settings, monkeypatch):
     assert not any(lead["name"].startswith("Engineer") for lead in data["leads"])  # role filter
     assert data["leads"][0]["outreach_draft"] == "Draft 0"
     assert data["leads"][0]["outreach"] == {"subject": "Subject 0", "email": "Draft 0", "linkedin_note": "Note 0"}
-    assert set(data["leads"][0]) == {"name", "title", "company", "profile_url", "source", "outreach_draft",
-                                     "outreach", "quality_score", "quality", "match_reasons", "verification"}
+    assert set(data["leads"][0]) == {"name", "title", "company", "profile_url", "profile_type", "source",
+                                     "outreach_draft", "outreach", "quality_score", "quality", "match_reasons",
+                                     "score_breakdown", "verification"}
     assert data["leads"][0]["verification"]["status"] in ("Verified", "Likely", "Unverified")
     assert "_signals" not in result and data["tier"] == "standard"
     assert data["data_source"] == "treg.to"
