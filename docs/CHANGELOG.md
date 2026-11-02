@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+### Iteration 6 — BL-05: a failed domain probe is not cached (2026-11-02)
+- When the domain probe raises (treg error, timeout), the unconfirmed resolution is used for that job only and
+  not cached; the next job for the company probes again. Before, it was cached for 24 h, so one provider
+  hiccup pushed every job for that company onto the unconfirmed-domain / name-search path for a day.
+- Completed resolutions (confirmed, or genuinely not found) are still cached for 24 h.
+- The resolver note now says when the data provider did not answer, instead of "could not confirm".
+
 ### Iteration 5 — BL-04: "confirmed by domain" only for a confirmed domain (2026-11-02)
 - Leads found by searching a domain the data provider could not confirm now carry evidence `given domain`:
   6 company points (as for a name match) instead of 10, and the reason "company matched by name (domain given

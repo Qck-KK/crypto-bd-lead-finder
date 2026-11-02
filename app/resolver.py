@@ -67,6 +67,7 @@ async def resolve_company(company: str, given_domain: Optional[str], probe: Opti
         return hit[1]
 
     result = ResolvedCompany(name=company, given_domain=given, domain=given, verified=False)
+    probe_failed = False
     if probe is not None:
         for candidate in candidate_domains(company, given):
             result.tried.append(candidate)
@@ -74,6 +75,7 @@ async def resolve_company(company: str, given_domain: Optional[str], probe: Opti
                 orgs = await probe(candidate)
             except Exception as e:  # a probe failure must not fail a paid job
                 logger.warning("Domain probe failed for %s: %s", candidate, type(e).__name__)
+                probe_failed = True
                 break
             # Strict match: a domain is only accepted if its people work at this very company.
             if any(same_company(org, company) for org in orgs):
@@ -86,11 +88,21 @@ async def resolve_company(company: str, given_domain: Optional[str], probe: Opti
         result.note = f"{given} is not indexed by the data provider; used {result.domain}."
     elif result.verified and not given:
         result.note = f"No domain given; found the company under {result.domain}."
-    elif not result.verified and given:
+    elif probe_failed and given:
+        result.note = f"The data provider did not answer, so {given} could not be confirmed; searched it as given."
+    elif probe_failed:
+        result.note = "No domain given and the data provider did not answer; results rely on name matching."
+    elif given:
         result.note = f"Could not confirm {given} with the data provider; searched it as given."
     else:
         result.note = "No domain given and none could be confirmed; results rely on name matching."
 
+    # A failed probe says nothing about the company: do not let one provider hiccup pin it to the
+    # unconfirmed (name-search, possibly paid) path for a day. Only completed resolutions are cached.
+    if probe_failed and not result.verified:
+        logger.info("Resolved %r (given %s) -> %s unverified after a probe error; not cached", company, given,
+                    result.domain)
+        return result
     _cache[key] = (now, result)
     logger.info("Resolved %r (given %s) -> %s verified=%s tried=%s", company, given, result.domain, result.verified,
                 result.tried)

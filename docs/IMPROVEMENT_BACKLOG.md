@@ -233,7 +233,15 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Unit test: unconfirmed domain → no "confirmed by domain" reason.
 
 ### BL-05 A failed domain probe is cached for 24 hours
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 6, 2026-11-02; not deployed)
+- **Resolution (iteration 6):** `app/resolver.py` `resolve_company` records whether a probe raised; such a
+  resolution is returned for the current job but not cached, so the next job probes again. Confirmed and
+  genuine not-found results are still cached for 24 h (probes are free, but they add latency to each job). The
+  note says "the data provider did not answer" instead of "could not confirm". No short negative TTL was added
+  (not needed for the hiccup case; can follow if stale not-found results show up). Tests in
+  `tests/test_quality.py`: failure then success with a given domain (second call probes and verifies, third is
+  cached), failure without a domain (not cached), genuine not-found (cached). The two failure tests and the note
+  assertion fail on the previous code.
 - **Evidence:** `app/resolver.py:73-77` (`break` on exception) then `app/resolver.py:94` caches the unverified
   result for `CACHE_TTL_S` = 24 h.
 - **Root cause:** Errors and genuine "not found" are cached alike.
@@ -411,11 +419,12 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code (`03cdbdd`); 120 tests pass (incl. PostgreSQL). Not deployed. |
 | 3 | 2026-11-02 | BL-08 | Fixed in code (`170f99e`); 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 | 4 | 2026-11-02 | BL-09 | Fixed in code (`debd1e3`); 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
-| 5 | 2026-11-02 | BL-04 | Fixed in code; 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
+| 5 | 2026-11-02 | BL-04 | Fixed in code (`c6b0c21`); 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
+| 6 | 2026-11-02 | BL-05 | Fixed in code; 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 
 ## Recommended next iteration (Step C)
 
-BL-05: do not cache a domain resolution whose probe raised (`app/resolver.py` `resolve_company`), so one treg
-hiccup does not push a company onto the unconfirmed-domain / paid name-search path for 24 h. Small and fully
-testable with mocks. After that: BL-06 (look-alike company names), then BL-10 (Gemini timeout). BL-32 is a
-one-line follow-up once the V2 state semantics are confirmed.
+BL-06: name matching in `app/compliance.py` accepts look-alike companies ("Chainlink" ⊆ "Chainlink Plumbing")
+in name-search mode. Small, mock-testable, and directly affects wrong-company leads (cost per qualified lead).
+After that: BL-10 (Gemini timeout), BL-07 (role synonyms). BL-32 is a short follow-up once the V2 state
+semantics are confirmed.

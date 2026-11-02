@@ -63,6 +63,50 @@ async def test_resolver_survives_probe_errors():
 
     r = await resolve_company("Acme", "acme.io", probe)
     assert (r.domain, r.verified) == ("acme.io", False)
+    assert "did not answer" in r.note
+
+
+async def test_resolver_does_not_cache_a_failed_probe():
+    calls = []
+
+    async def probe(domain):
+        calls.append(domain)
+        if len(calls) == 1:
+            raise TregError("hiccup")
+        return ["Acme"] if domain == "acme.io" else []
+
+    first = await resolve_company("Acme", "acme.io", probe, now=1000)
+    assert (first.verified, calls) == (False, ["acme.io"])
+    again = await resolve_company("Acme", "acme.io", probe, now=1001)  # probes again, not the cached failure
+    assert (again.domain, again.verified, calls) == ("acme.io", True, ["acme.io", "acme.io"])
+    cached = await resolve_company("Acme", "acme.io", probe, now=1002)  # a completed resolution is cached
+    assert cached is again and len(calls) == 2
+
+
+async def test_resolver_does_not_cache_a_failed_probe_without_domain():
+    calls = []
+
+    async def probe(domain):
+        calls.append(domain)
+        raise RuntimeError("timeout")
+
+    r = await resolve_company("Acme", None, probe, now=1000)
+    assert not r.verified and "did not answer" in r.note and "name matching" in r.note
+    await resolve_company("Acme", None, probe, now=1001)
+    assert len(calls) == 2
+
+
+async def test_resolver_caches_a_genuine_not_found():
+    calls = []
+
+    async def probe(domain):
+        calls.append(domain)
+        return []
+
+    r = await resolve_company("Acme", "acme.io", probe, now=1000)
+    assert not r.verified and "Could not confirm acme.io" in r.note
+    n = len(calls)
+    assert await resolve_company("Acme", "acme.io", probe, now=1001) is r and len(calls) == n
 
 
 # --- scoring ----------------------------------------------------------------
