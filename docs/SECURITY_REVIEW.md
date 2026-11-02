@@ -83,6 +83,12 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
   Low).
 
 ### Open questions for treg (must be confirmed before calling the cap a hard bound)
+Status 2026-11-02: answered from treg's published source where possible, in `docs/TREG_BILLING.md`.
+- **Hard bound:** `X-Treg-Route-Max-Cost` is **not** a hard bound on the final charge (pre-reservation guard
+  only).
+- **Free:** Apollo search is free.
+- **Bulk enrichment:** holds one unit and bills per match.
+- **Still open:** the credit rate and the deployed-vs-source questions.
 1. **Direct Apollo endpoints:** on `apollo.people.search` and `apollo.people.bulk_enrich`, can the final
    charge exceed what treg reserved against `X-Treg-Route-Max-Cost`, or is that a hard upper bound on the
    charge?

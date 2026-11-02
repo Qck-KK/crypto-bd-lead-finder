@@ -568,6 +568,24 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 9 | 2026-11-02 | BL-13 | Fixed in code (`4fd86b5`); 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
 | 10 | 2026-11-02 | BL-34, BL-35, BL-36, BL-37 (review H1, M1, M2, M3, L1-L3); BL-14 | Fixed in code; 252 tests pass (incl. 13 PostgreSQL on a throwaway cluster); 12 of 12 mutation checks caught. Not deployed. |
 
+## Roadmap (owner, 2026-11-02)
+
+1. **Confirm treg billing rules** (highest priority): Apollo, bulk enrichment, cost headers, 502 cost.
+   In progress: `docs/TREG_BILLING.md`.
+2. **BL-33:** budget check before payment.
+3. **BL-15:** rate limiting, so free Preprod test tokens cannot drain both agents' budget.
+4. **Deployment review:**
+   - database migration;
+   - env vars;
+   - both containers upgraded together;
+   - rollback.
+5. **Preprod integration test:**
+   - real payment flow and result delivery;
+   - refunds;
+   - concurrent jobs;
+   - crash recovery.
+6. **Mainnet:** only after real provider costs and the money flow are verified.
+
 ## Recommended next iteration (Step C)
 
 Before any deploy: send treg the questions in `SECURITY_REVIEW.md` ("Open questions for treg").
