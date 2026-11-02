@@ -24,6 +24,27 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # Dumps both databases on start and then every 24 h (deploy/backup.sh, keeps 7 of each).
+  # Same image as postgres, so nothing new is pulled. Copy the dumps off the server regularly:
+  # this only protects against a broken database or volume, not against losing the machine.
+  # Runs as the host user so the dumps can be copied off; create BACKUP_HOST_DIR as that user first.
+  backup:
+    image: postgres:15
+    user: "${BACKUP_UID:-1000}:${BACKUP_GID:-1000}"
+    entrypoint: ["/bin/sh", "-c", "while :; do sh /deploy/backup.sh || echo 'backup failed' >&2; sleep 86400; done"]
+    environment:
+      PGHOST: postgres
+      PGUSER: masumi
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_DIR: /backups
+    volumes:
+      - ./backup.sh:/deploy/backup.sh:ro
+      - ${BACKUP_HOST_DIR:-/data/workspace/backups}:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   # The 0.29.0 runtime image cannot seed, so this one-shot service builds the same release from
   # source, applies migrations, seeds an empty database (Preprod wallets) and exits.
   payment-setup:

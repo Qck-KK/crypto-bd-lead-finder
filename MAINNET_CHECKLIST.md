@@ -23,7 +23,9 @@ automatic switch.
 - [ ] `BLOCKFROST_API_KEY_MAINNET` only in that Payment Service.
 - [ ] New Mainnet selling and purchase hot wallets; `COLLECTION_WALLET_MAINNET_ADDRESS` = a hardware wallet,
       so payments leave the hot wallet. Mnemonics stored offline.
-- [ ] Daily backups (`deploy/backup.sh`) running and a restore tested.
+- [ ] Daily backups (`deploy/backup.sh`) running and a restore tested. (Done for the Preprod stack: compose
+      `backup` service; restore of a downloaded dump matched the live row counts. Repeat for Mainnet, and keep
+      copies off the host, apart from `ENCRYPTION_KEY`.)
 - [ ] Monitoring: `/metrics` scraped or `/admin/stats` checked daily; alert on `payments_rejected`, failed
       jobs and spend near `DAILY_SPEND_CAP_USD`.
 

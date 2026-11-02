@@ -30,7 +30,7 @@ The report ends with the data source and the B2B-only notice. It never contains 
 
 | Area | What happens |
 |---|---|
-| Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. `deploy/backup.sh` dumps both databases (keeps 7). |
+| Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. The compose `backup` service runs `deploy/backup.sh` on start and every 24 h: both databases, 7 dumps each, in `BACKUP_HOST_DIR` (default `/data/workspace/backups`). Copy them off the server; the Payment Service dump holds wallet keys encrypted with `ENCRYPTION_KEY`, so never store it next to the key. |
 | Idempotency | The result is stored under the job tag (purchaser identifier + input) before the SDK submits it on-chain. A re-run returns it unchanged: same on-chain hash, no provider paid twice. treg calls also carry idempotency keys. |
 | Recovery | On start: jobs awaiting payment get monitoring back; running jobs whose result is already on-chain are marked completed from the stored result (never resubmitted); refunded ones fail; locked ones run again. |
 | Payment acceptance | When the escrow is locked, the payment record is checked before any work: this agent, expected token, at least the registered price, this job's input hash. Otherwise the job fails and nothing is delivered. If the status cannot be read (3 tries), the job fails closed. |
@@ -180,6 +180,7 @@ cd deploy
 cp .env.example .env              # POSTGRES_PASSWORD, ENCRYPTION_KEY, ADMIN_KEY (openssl rand -hex 32), Blockfrost key
 cp agent.env.example agent.env    # TREG_TOKEN, GEMINI_API_KEY; PAYMENT_API_KEY and SELLER_VKEY after seeding
 cp agent.env.example agent-pro.env  # same keys, the Pro AGENT_IDENTIFIER and AGENT_PUBLIC_URL, ENRICH_BUDGET_USD=0
+mkdir -p -m 700 /data/workspace/backups  # as the host user (uid 1000) that the backup service runs as
 docker compose up -d --build
 docker compose logs payment-setup  # the generated wallet mnemonics are printed here once: store them offline
 ```
