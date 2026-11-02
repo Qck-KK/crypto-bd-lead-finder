@@ -18,20 +18,22 @@ from app.job_store import recover_jobs
 from app.logs import RedactFilter, job_tag_var
 from app.pricing import TUSDM_UNIT
 from app.server import ReliableAgentServer, check_payment
+from app.treg_client import TregError
 from conftest import CHAIN_ID, FakeGemini
 
 APOLLO_URL = "https://treg.test/call/apollo.people.search"
 ROUTED_URL = "https://treg.test/call/treg.people.search"
 INPUT = {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}
+FREE = {"X-Treg-Cost-Micro": "0"}  # Apollo's search is free: treg reports a zero cost
 
 
 def _apollo(request):
     body = json.loads(request.content)
     if body["q_organization_domains_list"] != ["acme.io"]:
-        return httpx.Response(200, json={"people": []})
+        return httpx.Response(200, json={"people": []}, headers=FREE)
     return httpx.Response(200, json={"people": [
         {"id": "p1", "first_name": "Jane", "last_name_obfuscated": "S***h", "title": "Head of BD",
-         "organization": {"name": "Acme Labs"}}]})
+         "organization": {"name": "Acme Labs"}}]}, headers=FREE)
 
 
 @pytest.fixture
@@ -73,29 +75,57 @@ async def test_failed_job_is_recorded_and_not_cached(settings, gemini, _fresh_le
 
 
 @respx.mock
-async def test_daily_cap_turns_paid_providers_off(settings, gemini, _fresh_ledger):
+async def test_daily_cap_reached_makes_no_treg_call_at_all(settings, gemini, _fresh_ledger):
+    # BL-13: Apollo and the domain probes are metered too, so a used-up cap stops every treg call and the job
+    # fails (refundable) instead of delivering an empty result.
     now = time.time()
     await _fresh_ledger.record_job({"tag": "old", "tier": "standard", "company": "x", "started_at": now,
                                     "finished_at": now, "duration_ms": 1, "treg_usd": 0.9, "enrich_usd": 0.1,
                                     "leads": 1, "llm_used": True, "outcome": "delivered", "price_tusdm": 0.27})
-    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}))
+    apollo = respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}, headers=FREE))
     routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
-    result = await process_job("buyer-cap", INPUT, dataclasses.replace(settings, daily_spend_cap_usd=1.0))
-    assert not routed.called
-    assert "treg routed (domain) on acme.io: skipped" in result
+    with pytest.raises(TregError, match="daily spend budget used up"):
+        await process_job("buyer-cap", INPUT, dataclasses.replace(settings, daily_spend_cap_usd=1.0))
+    assert not apollo.called and not routed.called
+    row = _fresh_ledger.jobs[_job_tag("buyer-cap", INPUT)]
+    assert row["outcome"] == "failed" and row["treg_usd"] == 0 and not _fresh_ledger.reservations
 
 
 @respx.mock
-async def test_unreadable_ledger_keeps_paid_providers_off(settings, gemini, monkeypatch):
+async def test_nearly_used_up_cap_skips_the_paid_search(settings, gemini, _fresh_ledger):
+    now = time.time()
+    await _fresh_ledger.record_job({"tag": "old", "tier": "standard", "company": "x", "started_at": now,
+                                    "finished_at": now, "duration_ms": 1, "treg_usd": 0.9905, "enrich_usd": 0.0,
+                                    "leads": 1, "llm_used": True, "outcome": "delivered", "price_tusdm": 0.27})
+    apollo = respx.post(APOLLO_URL).mock(side_effect=_apollo)
+    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    # 0.0095 left: no Apollo call (max 0.01) fits, so probe and Apollo search are skipped; the routed search is
+    # sent with the rest as its max cost and, without a cost header, counts at exactly that.
+    await process_job("buyer-near", INPUT, settings)
+    assert not apollo.called
+    assert routed.calls.last.request.headers["X-Treg-Route-Max-Cost"] == "0.0095"
+    assert await _fresh_ledger.spend_today() == pytest.approx(1.0)
+
+    _fresh_ledger.jobs["old"]["treg_usd"] = 0.9705  # with buyer-near's 0.0095: 0.02 left
+    routed.mock(return_value=httpx.Response(200, json={"output": {"people": []}}, headers={"X-Treg-Cost-Micro": "0"}))
+    result = await process_job("buyer-near-2", INPUT, settings)
+    assert apollo.called  # Apollo fits now and is free, so the routed search gets the whole 0.02
+    assert routed.calls.last.request.headers["X-Treg-Route-Max-Cost"] == "0.0200"
+    assert "Jane" in result and await _fresh_ledger.spend_today() <= 1.0 + 1e-9
+
+
+@respx.mock
+async def test_unreadable_ledger_makes_no_treg_call(settings, gemini, monkeypatch):
     class Broken(ledger_module.MemoryLedger):
         async def spend_today(self, now=None):
             raise RuntimeError("db down")
 
     ledger_module.set_ledger(Broken())
-    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}))
+    apollo = respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}, headers=FREE))
     routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
-    await process_job("buyer-x", INPUT, settings)
-    assert not routed.called
+    with pytest.raises(TregError):
+        await process_job("buyer-x", INPUT, settings)
+    assert not apollo.called and not routed.called
 
 
 async def test_ledger_stats_aggregate_by_day_and_tier(_fresh_ledger):
@@ -110,9 +140,9 @@ async def test_ledger_stats_aggregate_by_day_and_tier(_fresh_ledger):
     s = await _fresh_ledger.stats(7)
     pro = next(d for d in s["days"] if d["tier"] == "pro")
     assert (pro["jobs"], pro["delivered"], pro["failed"], pro["revenue_tusdm"]) == (2, 1, 1, 1.05)
-    assert s["totals"] == {"jobs": 4, "cost_usd": 0.31, "revenue_tusdm": 1.59}
+    assert s["totals"] == {"jobs": 4, "cost_usd": 0.31, "revenue_tusdm": 1.59, "cost_assumed_calls": 0}
     only_pro = await _fresh_ledger.stats(7, tier="pro")
-    assert only_pro["totals"] == {"jobs": 2, "cost_usd": 0.26, "revenue_tusdm": 1.05}
+    assert only_pro["totals"] == {"jobs": 2, "cost_usd": 0.26, "revenue_tusdm": 1.05, "cost_assumed_calls": 0}
 
 
 # --- payment acceptance ---------------------------------------------------------
@@ -352,4 +382,7 @@ async def test_admin_stats_and_metrics_need_the_token(env, payment_mock, monkeyp
         stats = (await c.get("/admin/stats", headers={"x-admin-token": "adm-1"})).json()
         metrics = (await c.get("/metrics", headers={"x-admin-token": "adm-1"})).text
     assert stats["tier"] == "standard" and stats["daily_spend_cap_usd"] == 1.0 and "ledger" in stats
+    assert stats["reserved_today_usd"] == 0
     assert 'bdlf_spend_today_usd{tier="standard"}' in metrics and "bdlf_payments_total" in metrics
+    assert 'bdlf_reserved_today_usd{tier="standard"} 0' in metrics
+    assert 'bdlf_cost_assumed_calls_7d{tier="standard"} 0' in metrics

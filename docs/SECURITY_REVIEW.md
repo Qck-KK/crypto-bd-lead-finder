@@ -57,9 +57,17 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
   In-memory rate limit keyed by client IP, likely the proxy's (BL-18).
 
 ### Spend controls
-- Per-call max-cost header, per-job budget, daily cap that fails closed when the ledger is unreadable
-  (`app/agent.py:206-217`). Concurrent jobs can overrun the cap and a missing cost header counts as $0
-  (BL-13, Medium).
+- Per-call max-cost header, per-job budget, daily cap that fails closed when the ledger is unreadable.
+- Since BL-13 (fixed in code, not deployed):
+  - Each job reserves its worst case before its first treg call; on PostgreSQL this is serialized across
+    both agents (`app/ledger.py` `reserve`, advisory lock).
+  - Every treg call is metered against the grant, including Apollo and the domain probes (`app/spend.py`).
+  - A missing or invalid cost header, an error response without one, or a timeout counts at the call's max
+    cost.
+  - Crashed jobs keep their hold until the end of the UTC day.
+- Remaining bound: the cap can only be exceeded if treg charges more than the max cost we send.
+- With the cap used up, paid jobs fail and wait for a refund instead of being refused before payment (BL-33,
+  Low).
 
 ### Infrastructure
 - Payment Service bound to `127.0.0.1:3001`; agents public on 8080/8081 behind InstaBox HTTPS.
@@ -77,6 +85,6 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
 ## Next security steps (in order)
 1. ~~BL-08~~ fixed in code; confirm the amount check in the deployed 0.29 Payment Service source.
 2. ~~BL-09~~ fixed in code: recovery treats a submit-in-progress as submitted.
-3. BL-13: reserve budget at job start; missing cost header = max cost.
+3. ~~BL-13~~ fixed in code: reservations, every call metered, missing cost header = max cost.
 4. BL-15 / BL-16 / BL-17: rate limit `/start_job`, generic error messages, hide docs.
 5. Run `pip-audit` and record the result here.

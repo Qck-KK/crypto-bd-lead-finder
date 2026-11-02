@@ -22,11 +22,13 @@ def needs_enrichment(lead: dict) -> bool:
 
 
 async def enrich_leads(settings: Settings, leads: list[dict], company: str, domain: str, tag: str) -> dict:
-    """Updates leads in place. Returns {"enriched": n, "spent_usd": x, "error": str}."""
+    """Updates leads in place. Returns {"enriched": n, "spent_usd": x, "cost_assumed": bool, "error": str}.
+
+    spent_usd is the call's max cost when treg reported no valid cost, also for a failed call."""
     todo = [lead for lead in leads if needs_enrichment(lead)]
     affordable = math.floor(settings.enrich_budget_usd / APOLLO_ENRICH_USD_PER_MATCH + 1e-9)
     todo = todo[: min(10, affordable)]
-    outcome = {"enriched": 0, "spent_usd": 0.0, "error": ""}
+    outcome = {"enriched": 0, "spent_usd": 0.0, "cost_assumed": False, "error": ""}
     if not todo:
         return outcome
 
@@ -40,9 +42,9 @@ async def enrich_leads(settings: Settings, leads: list[dict], company: str, doma
     except TregError as e:
         # Enrichment is an upgrade: without it the job still delivers the search results.
         logger.warning("Enrichment failed: %s", e)
-        outcome["error"] = "unavailable"
+        outcome.update(error="unavailable", spent_usd=e.cost_usd, cost_assumed=e.cost_assumed)
         return outcome
-    outcome["spent_usd"] = found.cost_usd or 0.0
+    outcome.update(spent_usd=found.cost_usd, cost_assumed=found.cost_assumed)
 
     for row in found.people:
         person = row.get("person") if isinstance(row.get("person"), dict) else row

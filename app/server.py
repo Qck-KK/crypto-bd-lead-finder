@@ -168,9 +168,11 @@ def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, a
             fb = await feedback.get_store().summary()
         except Exception:
             fb = None
-        # spend_today covers every agent on this database: they share one treg balance and one cap.
+        # spend_today covers every agent on this database: they share one treg balance and one cap. It includes
+        # reserved_today (held by running jobs, or by crashed ones until the end of the UTC day).
         return {"tier": settings.tier, "jobs_by_status": by_status, "payments": server.counters,
                 "spend_today_usd": round(await ledger.spend_today(), 4),
+                "reserved_today_usd": round(await ledger.reserved_today(), 4),
                 "daily_spend_cap_usd": settings.daily_spend_cap_usd,
                 "ledger": await ledger.stats(7, tier=settings.tier),
                 "feedback": fb}
@@ -191,7 +193,9 @@ def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, a
         lines += [f'bdlf_payments_total{{tier="{s["tier"]}",result="{k.split("_")[1]}"}} {v}'
                   for k, v in s["payments"].items()]
         lines += [f'bdlf_spend_today_usd{{tier="{s["tier"]}"}} {s["spend_today_usd"]}',
+                  f'bdlf_reserved_today_usd{{tier="{s["tier"]}"}} {s["reserved_today_usd"]}',
                   f'bdlf_daily_spend_cap_usd{{tier="{s["tier"]}"}} {s["daily_spend_cap_usd"]}',
+                  f'bdlf_cost_assumed_calls_7d{{tier="{s["tier"]}"}} {t["cost_assumed_calls"]}',
                   f'bdlf_jobs_7d{{tier="{s["tier"]}"}} {t["jobs"]}',
                   f'bdlf_cost_7d_usd{{tier="{s["tier"]}"}} {t["cost_usd"]}',
                   f'bdlf_revenue_7d_tusdm{{tier="{s["tier"]}"}} {t["revenue_tusdm"]}']

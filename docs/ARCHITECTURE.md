@@ -28,4 +28,7 @@ the result hash.
 
 ## Money safety
 - Paid provider calls: per-call max cost header, per-job budget, daily cap across both agents (shared ledger).
+  A job reserves its worst case before its first treg call (`spend_reservations`, advisory lock); every call,
+  Apollo included, must fit in what is left of that grant (`app/spend.py`), and an unknown cost counts as the
+  call's max cost. Settling swaps the reservation for the actual spend.
 - Paid enrichment stays off on Preprod by default: test-token buyers must not spend real treg balance.

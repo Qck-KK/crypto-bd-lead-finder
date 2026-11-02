@@ -5,6 +5,7 @@ treg relays provider-native rows, so field names differ by provider. This module
 `compliance.py` decides what may leave the agent.
 """
 
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -19,17 +20,28 @@ APOLLO_ENRICH_USD_PER_MATCH = 0.026
 APOLLO_MAX_COST_USD = 0.01
 
 _META_SAFE = re.compile(r"[^A-Za-z0-9._:-]")
+_COST_MICRO = re.compile(r"[0-9]{1,12}")
+
+logger = logging.getLogger(__name__)
 
 
 class TregError(Exception):
-    """treg refused the call or the upstream provider failed."""
+    """treg refused the call or the upstream provider failed.
+
+    cost_usd: what the failed call may have cost (its max cost unless treg reported a valid cost).
+    """
+
+    def __init__(self, message: str = "", *, cost_usd: float = 0.0, cost_assumed: bool = False):
+        super().__init__(message)
+        self.cost_usd, self.cost_assumed = cost_usd, cost_assumed
 
 
 @dataclass
 class TregSearchResult:
     people: list[dict[str, Any]]
     served_by: str = ""
-    cost_usd: Optional[float] = None
+    cost_usd: float = 0.0
+    cost_assumed: bool = False  # no valid X-Treg-Cost-Micro: cost_usd is the call's max cost
     call_id: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -143,18 +155,24 @@ async def _call(
     try:
         resp = await client.post(f"{base_url}/call/{endpoint_id}", json=body, headers=headers)
     except httpx.HTTPError as e:
-        raise TregError(f"treg request failed: {type(e).__name__}") from e
+        # The request may have reached treg (timeout, reset), so it may have been charged.
+        _warn_assumed(endpoint_id, max_cost_usd, "no response")
+        raise TregError(f"treg request failed: {type(e).__name__}", cost_usd=max_cost_usd, cost_assumed=True) from e
     finally:
         if owns_client:
             await client.aclose()
 
+    cost_usd, assumed = call_cost(resp, max_cost_usd)
+    if assumed:
+        _warn_assumed(endpoint_id, max_cost_usd, f"HTTP {resp.status_code} without a valid cost header")
     if resp.headers.get("X-Treg-Error") == "1" or resp.status_code >= 400:
-        raise TregError(f"treg returned HTTP {resp.status_code}: {_error_summary(resp)}")
+        raise TregError(f"treg returned HTTP {resp.status_code}: {_error_summary(resp)}", cost_usd=cost_usd,
+                        cost_assumed=assumed)
 
     try:
         payload = resp.json()
     except ValueError as e:
-        raise TregError("treg returned a non-JSON body") from e
+        raise TregError("treg returned a non-JSON body", cost_usd=cost_usd, cost_assumed=assumed) from e
 
     # Routed endpoints wrap rows as {output: {people}}; direct provider endpoints may relay the body as-is.
     output = payload.get("output", payload) if isinstance(payload, dict) else None
@@ -162,15 +180,28 @@ async def _call(
     if not isinstance(people, list):
         people = []
 
-    cost_micro = resp.headers.get("X-Treg-Cost-Micro")
     total = output.get("total_entries") if isinstance(output, dict) else None
     return TregSearchResult(
         people=[p for p in people if isinstance(p, dict)],
         served_by=resp.headers.get("X-Treg-Served-By", ""),
-        cost_usd=int(cost_micro) / 1_000_000 if cost_micro and cost_micro.isdigit() else None,
+        cost_usd=cost_usd,
+        cost_assumed=assumed,
         call_id=resp.headers.get("X-Treg-Call-Id", ""),
         extra={"total_entries": total} if total is not None else {},
     )
+
+
+def call_cost(resp: httpx.Response, max_cost_usd: float) -> tuple[float, bool]:
+    """(cost in USD, assumed). Without a valid X-Treg-Cost-Micro (missing, negative, fractional, garbage) the
+    call counts at the max cost we allowed for it, so spend is never undercounted. "0" is a real zero."""
+    raw = (resp.headers.get("X-Treg-Cost-Micro") or "").strip()
+    if _COST_MICRO.fullmatch(raw):
+        return int(raw) / 1_000_000, False
+    return max_cost_usd, True
+
+
+def _warn_assumed(endpoint_id: str, max_cost_usd: float, why: str) -> None:
+    logger.warning("treg %s: %s; counting its max cost %.4f USD", endpoint_id.split("?")[0], why, max_cost_usd)
 
 
 def _error_summary(resp: httpx.Response) -> str:

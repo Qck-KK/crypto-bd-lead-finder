@@ -15,11 +15,12 @@ from .ledger import get_ledger
 from .logs import job_tag_var
 from .pricing import estimate
 from .report import FOOTER, build_result
-from .resolver import resolve_company
+from .resolver import candidate_domains, resolve_company
 from .router import find_leads, person_hash, public_view
 from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
-from .treg_client import search_apollo
+from .spend import JobBudget, SpendCapReached
+from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo
 from .verify import apply_verification, verify_lead
 
 logger = logging.getLogger(__name__)
@@ -141,12 +142,20 @@ def _job_tag(identifier_from_purchaser: str, input_data: dict) -> str:
     return hashlib.sha256(seed.encode()).hexdigest()[:32]
 
 
-def _apollo_probe(settings: Settings, tag: str):
-    """Resolver probe: organisation names Apollo returns for a domain (free, no titles)."""
+def _apollo_probe(settings: Settings, tag: str, budget: JobBudget):
+    """Resolver probe: organisation names Apollo returns for a domain (free, no titles). Metered like any
+    treg call: sent only if the job's grant covers its max cost, and charged to it."""
     async def probe(domain: str) -> list[str]:
-        found = await search_apollo(token=settings.treg_token, domain=domain, titles=None, per_page=5,
-                                    job_tag=f"{tag}-probe-{domain}", base_url=settings.treg_base_url,
-                                    timeout_s=settings.treg_timeout_s)
+        if not budget.covers(APOLLO_MAX_COST_USD):
+            raise SpendCapReached("daily spend budget used up")
+        try:
+            found = await search_apollo(token=settings.treg_token, domain=domain, titles=None, per_page=5,
+                                        job_tag=f"{tag}-probe-{domain}", base_url=settings.treg_base_url,
+                                        timeout_s=settings.treg_timeout_s)
+        except TregError as e:
+            budget.charge_call(e)
+            raise
+        budget.charge_call(found)
         names = []
         for row in found.people:
             org = row.get("organization")
@@ -174,17 +183,18 @@ async def process_job(identifier_from_purchaser: str, input_data: dict, settings
             return cached
 
         started = time.time()
-        metrics = {"treg_usd": 0.0, "enrich_usd": 0.0, "leads": 0, "llm_used": False}
+        metrics = {"leads": 0, "llm_used": False}
+        budget = JobBudget(granted=0.0)  # nothing may be spent until _run_job has reserved
         try:
-            result = await _run_job(input_data, settings, tag, metrics)
+            result = await _run_job(input_data, settings, tag, metrics, budget)
         except Exception:
-            await _record(ledger, settings, tag, input_data, started, metrics, "failed")
+            await _record(ledger, settings, tag, input_data, started, metrics, budget, "failed")
             raise
         try:
             await ledger.put_result(tag, settings.tier, result)
         except Exception as e:
             logger.warning("Could not store the result for re-runs: %s", type(e).__name__)
-        await _record(ledger, settings, tag, input_data, started, metrics,
+        await _record(ledger, settings, tag, input_data, started, metrics, budget,
                       "delivered" if metrics["leads"] else "empty")
         return result
     finally:
@@ -192,34 +202,44 @@ async def process_job(identifier_from_purchaser: str, input_data: dict, settings
 
 
 async def _record(ledger, settings: Settings, tag: str, input_data: dict, started: float, metrics: dict,
-                  outcome: str) -> None:
+                  budget: JobBudget, outcome: str) -> None:
+    """Settles the job: its actual spend replaces its reservation. Never raises (a paid job must not fail here);
+    if the ledger is down the reservation stays and keeps counting until the end of the UTC day."""
     now = time.time()
     row = {"tag": tag, "tier": settings.tier, "company": str(input_data.get("company") or "")[:100],
            "started_at": started, "finished_at": now, "duration_ms": int((now - started) * 1000),
-           "price_tusdm": estimate(settings.tier)["price_tusdm"], "outcome": outcome, **metrics}
-    logger.info("job finished outcome=%s leads=%d treg_usd=%.4f enrich_usd=%.4f duration_ms=%d", outcome,
-                metrics["leads"], metrics["treg_usd"], metrics["enrich_usd"], row["duration_ms"])
+           "price_tusdm": estimate(settings.tier)["price_tusdm"], "outcome": outcome, **metrics, **budget.totals()}
+    logger.info("job finished outcome=%s leads=%d treg_usd=%.4f enrich_usd=%.4f cost_assumed_calls=%d "
+                "duration_ms=%d", outcome, metrics["leads"], row["treg_usd"], row["enrich_usd"],
+                row["cost_assumed_calls"], row["duration_ms"])
     try:
-        await ledger.record_job(row)
+        await ledger.settle(row)
     except Exception as e:
         logger.warning("Could not write the cost ledger: %s", type(e).__name__)
 
 
-async def _daily_remaining(settings: Settings) -> float:
+def _spend_ceiling(settings: Settings, company: str, domain: Optional[str]) -> float:
+    """Worst-case treg spend of one job: every domain probe and the Apollo search at their max cost (free today,
+    but metered), the routed budget, and (Pro) the enrichment budget."""
+    apollo_calls = len(candidate_domains(company, domain)) + 1
+    enrich = settings.enrich_budget_usd if settings.enrichment_enabled else 0.0
+    return round(apollo_calls * APOLLO_MAX_COST_USD + settings.job_budget_usd + enrich, 6)
+
+
+async def _reserve(settings: Settings, tag: str, want_usd: float) -> float:
     try:
-        spent = await get_ledger().spend_today()
+        granted = await get_ledger().reserve(tag, settings.tier, want_usd, settings.daily_spend_cap_usd)
     except Exception as e:
-        # Without the ledger we cannot prove we are under the cap, so paid providers stay off.
-        logger.warning("Spend ledger unavailable, paid providers disabled for this job: %s", type(e).__name__)
+        # Without the ledger we cannot prove we are under the cap, so no treg call is made.
+        logger.warning("Spend ledger unavailable, no treg calls for this job: %s", type(e).__name__)
         return 0.0
-    remaining = max(0.0, settings.daily_spend_cap_usd - spent)
-    if remaining <= 0:
-        logger.warning("Daily spend cap reached (%.4f of %.2f USD): free providers only", spent,
-                       settings.daily_spend_cap_usd)
-    return remaining
+    if granted + 1e-9 < want_usd:
+        logger.warning("Daily spend cap %.2f USD: reserved %.4f of %.4f USD for this job",
+                       settings.daily_spend_cap_usd, granted, want_usd)
+    return granted
 
 
-async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict) -> str:
+async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict, budget: JobBudget) -> str:
     company = _clean(input_data.get("company"), 100)
     if not company:
         raise ValueError("company is required")
@@ -238,11 +258,11 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
         logger.warning("Suppression list unavailable: %s", type(e).__name__)
         suppressed = frozenset()
 
-    resolved = await resolve_company(company, domain, _apollo_probe(settings, tag) if settings.treg_token else None)
-    remaining = await _daily_remaining(settings)
-    budgeted = dataclasses.replace(settings, job_budget_usd=min(settings.job_budget_usd, remaining))
-    routed = await find_leads(budgeted, company, role, resolved, tag, suppressed=suppressed)
-    metrics["treg_usd"] = routed.spent_usd
+    # Reserve before the first treg call (the resolver probe); a retry of this job reuses its reservation.
+    budget.granted = await _reserve(settings, tag, _spend_ceiling(settings, company, domain))
+    resolved = await resolve_company(company, domain,
+                                     _apollo_probe(settings, tag, budget) if settings.treg_token else None)
+    routed = await find_leads(settings, company, role, resolved, tag, suppressed=suppressed, budget=budget)
     leads = routed.leads
 
     # What the report says about enrichment (Pro only); never claims work that did not happen.
@@ -253,12 +273,12 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
                       "status": "off" if not settings.enrichment_enabled else "not needed" if not candidates else "ok"}
         if settings.enrichment_enabled and candidates:
             enrich_settings = dataclasses.replace(
-                settings, enrich_budget_usd=min(settings.enrich_budget_usd, max(0.0, remaining - routed.spent_usd)))
+                settings, enrich_budget_usd=min(settings.enrich_budget_usd, budget.remaining))
             if enrich_settings.enrich_people_per_job == 0:
                 enrichment["status"] = "daily spend cap reached"
             else:
                 done = await enrich_leads(enrich_settings, leads, company, resolved.domain or "", tag)
-                metrics["enrich_usd"] = done["spent_usd"]
+                budget.charge(done["spent_usd"], assumed=done["cost_assumed"], kind="enrich")
                 enrichment.update(enriched=done["enriched"], status=done["error"] or "ok")
         for lead in leads:
             if lead.get("_signals", {}).get("enriched"):
@@ -271,8 +291,8 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     outreach, used_llm = await write_outreach(leads, ctx, api_key=settings.gemini_api_key,
                                               model=settings.gemini_model, timeout_s=settings.gemini_timeout_s)
     metrics.update(leads=len(leads), llm_used=used_llm)
-    logger.info("Delivering %d leads (tier %s, LLM outreach: %s, router spend %.4f USD, enrich %s)", len(leads),
-                settings.tier, used_llm, routed.spent_usd, enrichment)
+    logger.info("Delivering %d leads (tier %s, LLM outreach: %s, treg spend %.4f USD, enrich %s)", len(leads),
+                settings.tier, used_llm, budget.treg_usd, enrichment)
 
     link = feedback.feedback_link(settings.public_url, tag, settings.feedback_secret)
     if link:

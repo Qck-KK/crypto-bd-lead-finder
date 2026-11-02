@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Iteration 9 — BL-13: the daily spend cap holds under concurrency (2026-11-02)
+- A job reserves its worst-case treg spend before its first call: domain probes and the Apollo search at $0.01
+  each, the routed budget, and the Pro enrichment budget when on. It gets what the cap still allows. On
+  PostgreSQL the reservation is serialized across both agents with an advisory lock (new table
+  `spend_reservations`).
+- Every treg call is metered against that grant, the free Apollo search and domain probes included. A call is
+  sent only if its max cost fits, and its cost is deducted. The actual spend replaces the reservation when the
+  job finishes.
+- A missing or invalid `X-Treg-Cost-Micro` header now counts as the call's max cost (was $0), also for failed
+  calls and timeouts; `"0"` stays zero. Counted per job as `cost_assumed_calls` (new `job_costs` column) and
+  shown in `/metrics`.
+- A crashed job's reservation counts until the end of the UTC day; a retry of the same job reuses it.
+- With the cap used up a job now makes no treg call and fails (refundable) instead of delivering an
+  Apollo-only result. `/admin/stats` adds `reserved_today_usd`; `spend_today_usd` includes it.
+- Payment verification, escrow, refunds and the job state machine are unchanged.
+
 ### Iteration 8 — BL-10: the Gemini drafting call is bounded (2026-11-02)
 - The one drafting call per job now times out after `GEMINI_TIMEOUT_S` (default 45 s); google-genai sets no
   timeout of its own, so a hanging call used to keep a paid job `running` until its result deadline. On

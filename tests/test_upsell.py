@@ -43,15 +43,18 @@ def _enriched(pid, first, last):
             "employment_history": [{"current": True, "title": "Head of BD", "organization_name": "Acme Labs"}]}
 
 
+FREE = {"X-Treg-Cost-Micro": "0"}  # Apollo's search is free: treg reports a zero cost
+
+
 def _apollo_handler(request):
     body = json.loads(request.content)
     if body["q_organization_domains_list"] != ["acme.io"]:
-        return httpx.Response(200, json={"people": []})
+        return httpx.Response(200, json={"people": []}, headers=FREE)
     return httpx.Response(200, json={"people": [_apollo_row("p1", "Jane", "Head of BD"),
                                                 _apollo_row("p2", "Ann", "BD Manager"),
                                                 _apollo_row("p3", "Max", "Business Development Lead"),
                                                 _apollo_row("p4", "Ola", "BD Lead"),
-                                                _apollo_row("p5", "Kim", "Partnerships Lead")]})
+                                                _apollo_row("p5", "Kim", "Partnerships Lead")]}, headers=FREE)
 
 
 # --- enrichment ---------------------------------------------------------------
@@ -109,11 +112,28 @@ async def test_pro_enrichment_skipped_when_daily_cap_is_used_up(settings, monkey
     enrich = respx.post(url__startswith=ENRICH_URL).mock(return_value=httpx.Response(200, json={"matches": []}))
     monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
 
-    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.0)
+    # 0.02 left today: the (free) Apollo calls fit, one enrichment match (~0.026) does not.
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.02)
     data = _extract_json(await process_job("buyer", {"company": "Acme Labs", "role": "BD",
                                                      "company_domain": "acme.io"}, pro))
     assert not enrich.called
     assert data["enrichment"]["status"] == "daily spend cap reached" and data["enrichment"]["enriched"] == 0
+
+
+@respx.mock
+async def test_pro_enrichment_is_limited_to_what_the_reservation_has_left(settings, monkeypatch, _fresh_ledger):
+    respx.post(APOLLO_URL).mock(side_effect=_apollo_handler)
+    enrich = respx.post(url__startswith=ENRICH_URL).mock(return_value=httpx.Response(
+        200, json={"matches": []}, headers={"X-Treg-Cost-Micro": "52000"}))
+    monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
+
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.06)
+    await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}, pro)
+    req = enrich.calls.last.request
+    assert len(json.loads(req.content)["details"]) == 2  # 0.06 granted, Apollo free: 2 x 0.026 fit
+    assert req.headers["X-Treg-Route-Max-Cost"] == "0.0570"
+    row = next(iter(_fresh_ledger.jobs.values()))
+    assert row["enrich_usd"] == pytest.approx(0.052) and await _fresh_ledger.spend_today() <= 0.06 + 1e-9
 
 
 async def test_standard_report_has_no_enrichment_line(settings):
@@ -134,7 +154,8 @@ async def test_enrichment_budget_limits_people_and_errors_are_soft(settings):
             402, json={"error": "insufficient_balance"}, headers={"X-Treg-Error": "1"}))
         out = await enrich_leads(dataclasses.replace(settings, enrich_budget_usd=0.08), leads, "Acme", "acme.io", "t")
     assert len(json.loads(route.calls.last.request.content)["details"]) == 3  # 0.08 / 0.026
-    assert out == {"enriched": 0, "spent_usd": 0.0, "error": "unavailable"}
+    # The 402 carried no cost header, so the failed call counts at its max cost (BL-13).
+    assert out == {"enriched": 0, "spent_usd": 0.08, "cost_assumed": True, "error": "unavailable"}
     assert leads[0]["name"] == "P0 S***h"
 
 

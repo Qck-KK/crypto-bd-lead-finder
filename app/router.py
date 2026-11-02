@@ -8,6 +8,9 @@ Order:
 
 Every row goes through the compliance filter, then gets a quality score. The same person found by
 two providers is merged and the better-scoring record kept (a full name beats a masked one).
+
+Spend: every call, Apollo included, is sent only if the job's daily-cap grant (`JobBudget`) covers its max
+cost, and its cost is charged to that grant. TREG_JOB_BUDGET_USD additionally caps the routed calls.
 """
 
 import hashlib
@@ -20,7 +23,8 @@ from .compliance import filter_people, role_terms, row_signals
 from .resolver import ResolvedCompany
 from .scoring import rate, score_parts
 from .settings import Settings
-from .treg_client import TregError, search_apollo, search_people
+from .spend import JobBudget
+from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo, search_people
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +45,7 @@ class SearchStep:
 class RouteResult:
     leads: list[dict]
     steps: list[SearchStep] = field(default_factory=list)
-    spent_usd: float = 0.0
+    spent_usd: float = 0.0  # routed calls only (TREG_JOB_BUDGET_USD); the JobBudget holds every call
     dropped_low_score: int = 0
     suppressed: int = 0
 
@@ -105,8 +109,10 @@ class _Pool:
 
 
 async def find_leads(settings: Settings, company: str, role: Optional[str], resolved: ResolvedCompany,
-                     tag: str, suppressed: frozenset = frozenset()) -> RouteResult:
-    """suppressed: person_hash values buyers reported as gone or wrong; never delivered again."""
+                     tag: str, suppressed: frozenset = frozenset(), budget: Optional[JobBudget] = None) -> RouteResult:
+    """suppressed: person_hash values buyers reported as gone or wrong; never delivered again.
+    budget: the job's share of the daily cap; None = unmetered (tools and tests only)."""
+    budget = budget if budget is not None else JobBudget()
     pool = _Pool(company, role, suppressed)
     result = RouteResult(leads=[])
     succeeded = False
@@ -119,15 +125,19 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
 
     if resolved.domain:
         step = SearchStep("apollo", resolved.domain)
-        try:
-            found = await search_apollo(token=settings.treg_token, domain=resolved.domain,
-                                        titles=role_terms(role) or None, per_page=FETCH_ROWS, job_tag=f"{tag}-ap",
-                                        base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s)
-            step.rows, step.cost_usd = len(found.people), found.cost_usd or 0.0
-            step.kept = pool.add(found.people, found.served_by, resolved.domain, domain_evidence)
-            succeeded = True
-        except TregError as e:
-            step.error = str(e)
+        if not budget.covers(APOLLO_MAX_COST_USD):
+            step.error = "daily spend budget used up"
+        else:
+            try:
+                found = await search_apollo(token=settings.treg_token, domain=resolved.domain,
+                                            titles=role_terms(role) or None, per_page=FETCH_ROWS,
+                                            job_tag=f"{tag}-ap", base_url=settings.treg_base_url,
+                                            timeout_s=settings.treg_timeout_s)
+                step.rows, step.cost_usd = len(found.people), budget.charge_call(found)
+                step.kept = pool.add(found.people, found.served_by, resolved.domain, domain_evidence)
+                succeeded = True
+            except TregError as e:
+                step.error, step.cost_usd = str(e), budget.charge_call(e)
         result.steps.append(step)
 
     paid = []
@@ -139,10 +149,10 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
     for i, (mode, domain) in enumerate(paid):
         if enough():
             break
-        remaining = settings.job_budget_usd - result.spent_usd
+        remaining = min(settings.job_budget_usd - result.spent_usd, budget.remaining)
         step = SearchStep(f"treg routed ({mode})", domain or company)
         if remaining < 0.001:
-            step.error = "job budget used up"
+            step.error = "job budget used up" if budget.remaining >= 0.001 else "daily spend budget used up"
             result.steps.append(step)
             break
         try:
@@ -151,20 +161,21 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
                 limit=FETCH_ROWS if (domain and role) else settings.max_people,
                 max_cost_usd=min(settings.treg_max_cost_usd, remaining), job_tag=f"{tag}-r{i}",
                 base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s)
-            step.rows, step.cost_usd = len(found.people), found.cost_usd or 0.0
-            result.spent_usd += step.cost_usd
+            step.rows, step.cost_usd = len(found.people), budget.charge_call(found)
             step.provider = f"treg routed ({mode}) via {found.served_by or '?'}"
             step.kept = pool.add(found.people, found.served_by, domain, domain_evidence if domain else "name")
             succeeded = True
         except TregError as e:
-            step.error = str(e)
+            step.error, step.cost_usd = str(e), budget.charge_call(e)
+        result.spent_usd += step.cost_usd
         result.steps.append(step)
 
     for s in result.steps:
         logger.info("search %s %s: rows=%d kept=%d cost=%.4f %s", s.provider, s.query, s.rows, s.kept, s.cost_usd,
                     s.error)
     if not succeeded and result.steps:
-        # Every provider failed: fail the job (the buyer can get a refund) instead of delivering nothing.
+        # Every provider failed or could not be afforded: fail the job (the buyer can get a refund) instead of
+        # delivering nothing.
         raise TregError("all data providers failed: " + "; ".join(s.error for s in result.steps if s.error))
 
     result.leads, result.dropped_low_score = pool.best(settings.max_people, settings.min_lead_score)

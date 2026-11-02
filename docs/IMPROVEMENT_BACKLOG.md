@@ -305,7 +305,47 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Fallback rate visible in `/metrics`; a confirmed working model on the deployment.
 
 ### BL-13 Spend cap can be overrun and undercounted
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 9, 2026-11-02; not deployed)
+- **Resolution (iteration 9):**
+  - *Reservation:* before its first treg call a job reserves its worst case in the ledger
+    (`app/agent.py` `_spend_ceiling`): every domain probe and the Apollo search at their $0.01 max cost,
+    `TREG_JOB_BUDGET_USD`, and (Pro, enrichment on) `ENRICH_BUDGET_USD`; $0.20 for a standard job with a domain.
+    `ledger.reserve` grants `min(want, cap − today's settled spend − open reservations)`. On PostgreSQL this
+    runs in one transaction under `pg_advisory_xact_lock`, so the standard and Pro containers cannot both
+    read the same remainder (`app/ledger.py`, table `spend_reservations`).
+  - *Metering:* every treg call (probe, Apollo search, routed search, enrichment) is sent only if what is left
+    of the grant covers its max cost (`app/spend.py` `JobBudget`), and its cost is deducted. Calls within a
+    job run one after another, so a free call gives its share back to the next. `TREG_JOB_BUDGET_USD` still
+    caps the routed calls on their own.
+  - *Settlement:* `ledger.settle` writes the job's `job_costs` row and deletes the reservation in one
+    transaction.
+  - *Cost headers:* a missing or invalid `X-Treg-Cost-Micro` (empty, fractional, negative, garbage) counts
+    at the max cost sent for that call, as do error responses without one and transport errors. `"0"` is
+    zero. Assumed costs are logged and counted (`cost_assumed_calls` per job, in `/admin/stats` and
+    `/metrics` as `bdlf_cost_assumed_calls_7d`); open reservations show as `reserved_today_usd`.
+  - *Crash:* an unsettled reservation counts until the end of its UTC day. A retry with the same job tag
+    reuses it (topped up to the ceiling if the cap allows, never doubled).
+  - *Ledger failure:* an unreadable ledger grants 0, so no treg call is made. A failed settle is logged and
+    never fails the paid job.
+  - *Not touched:* payment verification, escrow, refunds and the job state machine.
+- **Behaviour change:** with the cap used up a job makes no treg call at all (Apollo included), so it ends
+  `failed` (refundable) instead of delivering an empty Apollo-only result. With little left, the cheaper calls
+  still run within it (see BL-33).
+- **Tests:** `tests/test_spend.py`.
+  - *Concurrency:* two concurrent jobs with cap = one job budget (one routed call, spend ≤ cap); jobs that fit
+    still run in parallel.
+  - *PostgreSQL:* 8 parallel reservations from two ledgers; `reserve` blocks behind another agent's lock and
+    then sees its hold; settle is atomic; a previous day's hold expires; the schema upgrade is idempotent.
+  - *Cost headers:* parsing per header value; failed calls carry their cost; Apollo and probe costs are
+    recorded.
+  - *Crash and retry:* a crash keeps the hold; the retry reuses it while another job is refused.
+  - *Reserves nothing:* a cached re-run and an invalid input.
+  - *Ledger failures:* settle failure.
+  - *Pro:* enrichment is limited to the grant's rest.
+  - *Checks:* the concurrency, reuse and crash tests fail with reservations disabled, and the PostgreSQL lock
+    test fails without the advisory lock.
+- **Still to verify on deployment:** whether treg sends `X-Treg-Cost-Micro: 0` on free Apollo calls. If not,
+  each counts $0.01 and `cost_assumed_calls` shows it.
 - **Evidence:** `app/agent.py:206-217` reads today's spend before the job and records it only at the end
   (`app/agent.py:185`), so concurrent jobs each see the full remainder; `app/treg_client.py:170` and
   `app/router.py:151` count a missing `X-Treg-Cost-Micro` header as $0.
@@ -313,6 +353,17 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Proposed solution:** Reserve the job budget in the ledger at start and settle at the end; treat a missing
   cost header as the call's max cost.
 - **Acceptance criteria:** Concurrency test with two jobs and a cap of one job budget; test for missing header.
+
+### BL-33 A job sold with the daily cap used up fails after payment
+- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Open (found in iteration 9)
+- **Evidence:** since BL-13 a job whose reservation is 0 makes no treg call and fails
+  ("daily spend budget used up"); `/availability` still says `available`.
+- **Impact:** The buyer pays, gets no result and must wait for the refund window. Rare while the cap
+  (default $1.00/day) is far above real spend.
+- **Proposed solution:** Report `unavailable` and refuse `/start_job` (as the BL-01 sale guard does) while
+  today's remainder is below one job's spend ceiling; re-check per request with a short cache.
+- **Acceptance criteria:** With the cap used up, `/availability` is unavailable and `/start_job` returns 503;
+  both recover when the UTC day rolls over or spend settles below the cap.
 
 ### BL-14 Result cache key ignores the payment; cached forever
 - **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Open
@@ -441,12 +492,13 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 5 | 2026-11-02 | BL-04 | Fixed in code (`c6b0c21`); 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
 | 6 | 2026-11-02 | BL-05 | Fixed in code (`b39e9f0`); 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 | 7 | 2026-11-02 | BL-06 | Fixed in code (`4d02fca`); 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
-| 8 | 2026-11-02 | BL-10 | Fixed in code; 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
+| 8 | 2026-11-02 | BL-10 | Fixed in code (`c464d8d`); 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
+| 9 | 2026-11-02 | BL-13 | Fixed in code; 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
 
 ## Recommended next iteration (Step C)
 
-BL-13: the daily spend cap is read before a job and recorded only at its end, so concurrent jobs can overrun
-it, and a missing treg cost header counts as $0. It protects real treg balance, and it is mock-testable
-(two concurrent jobs, cap = one job budget; missing header). After that: BL-07 (role synonyms), BL-11
-(fallback counter in `/metrics`; the live model check needs the server). BL-32 is a short follow-up once the
-V2 state semantics are confirmed.
+BL-33: since BL-13 a job arriving with the daily cap used up makes no treg call and fails, so the buyer pays
+and waits for a refund. Reporting `unavailable` while today's remainder is below one job's ceiling would stop
+such sales before payment (the BL-01 sale guard is the pattern; no payment code involved). After that:
+BL-07 (role synonyms), BL-11 (fallback counter in `/metrics`; the live model check needs the server). BL-32
+is a short follow-up once the V2 state semantics are confirmed.
