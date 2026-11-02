@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
+- B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not
+  passed, so expired unpaid orders no longer hold the 30 slots until a restart. An unreadable pay-by time
+  counts.
+- Requests admitted but still being turned into orders by the SDK count too, under a lock, so concurrent
+  requests cannot overshoot; the count is released when the request ends, also on failure.
+- BL-33 (owner decision): a job never runs on part of its budget. Reservations are all or nothing; without the
+  whole worst-case budget (or with an unreadable ledger) the job makes no treg call, submits no result and fails
+  (`BudgetUnavailable`), so the payment stays refundable. Before, a partial grant ran with fewer providers.
+- D1: `START_JOB_PER_CLIENT_PER_HOUR` defaults to 30 (= the per-agent total), because the proxy puts every
+  request behind one address. This is provisional and not yet checked against real traffic. Forwarded headers
+  stay untrusted.
+- The payment check, escrow, refunds and the payment state machine are unchanged; the agent never calls
+  authorize-refund.
+
 ### Iteration 11 — BL-33, BL-15 and the deployment review (2026-11-02)
 - Before the SDK creates a payment request, `/start_job` now checks today's shared data budget (BL-33):
   - when what is left (settled spend + open holds, both agents) cannot cover one job's worst case ($0.22

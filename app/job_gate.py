@@ -8,15 +8,21 @@ path changes. In order:
    connecting address, or the first entry of RATE_LIMIT_CLIENT_HEADER when the proxy sets one. Behind a proxy
    without that header, and for orders relayed by a marketplace, every request shares one client, so the
    per-client limit acts as a second total limit.
-3. Unpaid orders (BL-15): at most MAX_AWAITING_PAYMENT jobs awaiting payment; each one is a monitoring task that
-   polls the Payment Service until its pay-by time.
+3. Unpaid orders (BL-15): at most MAX_AWAITING_PAYMENT orders whose pay-by time has not passed. The pay-by time
+   is the Payment Service's (`payByTime` of the payment request, stored by the SDK as the job's `pay_by_time`);
+   an order without a readable one counts (fail closed). Expired unpaid orders do not count: masumi 1.2.0 never
+   expires them while it runs (only `recover_jobs` does, at startup), so counting them would block sales until a
+   restart (DEPLOY_PREFLIGHT B1). Requests admitted but still being created by the SDK count too, under a lock,
+   so concurrent requests cannot overshoot the limit.
 4. Daily budget (BL-33): refused while what is left of today's shared cap (settled spend + open holds, all agents)
    is below one job's worst-case spend, or when the ledger cannot be read. This is a check, not a reservation:
    unpaid orders hold nothing, so they cannot use up the cap. The cap can still run out between /start_job and
-   the payment; then the job reserves 0, makes no treg call and fails (refundable), as before.
+   the payment; then the job's all-or-nothing reservation gets nothing, it makes no treg call and fails
+   (refundable; see agent.BudgetUnavailable).
 429 and 503 answers carry Retry-After and a generic message; spend figures are never shown to buyers.
 """
 
+import asyncio
 import logging
 import math
 import time
@@ -27,6 +33,7 @@ from typing import Any, Callable, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from .job_store import _epoch_s
 from .ledger import end_of_utc_day, get_ledger
 from .resolver import MAX_DOMAIN_CANDIDATES
 from .settings import Settings
@@ -78,8 +85,12 @@ class _Window:
 
 class StartJobGate:
     def __init__(self, settings: Settings, static_reason: Optional[str] = None, server: Any = None,
-                 clock: Callable[[], float] = time.monotonic, budget_ttl_s: float = 15.0):
-        self.settings, self.static_reason, self.server, self.clock = settings, static_reason, server, clock
+                 clock: Callable[[], float] = time.monotonic, budget_ttl_s: float = 15.0,
+                 wall: Callable[[], float] = time.time):
+        self.settings, self.static_reason, self.server, self.clock, self.wall = (settings, static_reason, server,
+                                                                                 clock, wall)
+        self.admitting = 0  # admitted /start_job requests the SDK is still turning into stored orders
+        self._admission = asyncio.Lock()
         self.total = _Window(settings.start_job_per_hour, clock)
         self.clients: dict[str, _Window] = {}
         self.budget_ttl_s = budget_ttl_s
@@ -116,15 +127,25 @@ class StartJobGate:
         return problem
 
     async def unpaid_jobs(self) -> int:
+        """Orders awaiting payment whose Payment Service pay-by time has not passed (unreadable ones count)."""
         if self.server is None:
             return 0
-        return len(await self.server.job_manager.list_jobs("awaiting_payment"))
+        now = self.wall()
+        open_orders = 0
+        for job in await self.server.job_manager.list_jobs("awaiting_payment"):
+            pay_by = _epoch_s(job.get("pay_by_time"))
+            open_orders += 1 if pay_by is None or pay_by > now else 0
+        return open_orders
+
+    def release(self) -> None:
+        """The admitted request has finished (its order is stored, or creating it failed)."""
+        self.admitting = max(0, self.admitting - 1)
 
     async def availability_problem(self) -> Optional[str]:
         return self.static_reason or await self.budget_problem()
 
     async def check(self, request: Request) -> Optional[JSONResponse]:
-        """None if the order may proceed (and is counted), else the refusal to send."""
+        """None if the order may proceed (it is then counted, and `release` must follow), else the refusal."""
         if self.static_reason:
             return _refuse(503, f"Not accepting jobs: {self.static_reason}")
         client = self.clients.setdefault(self.client_key(request),
@@ -146,21 +167,25 @@ class StartJobGate:
         return None
 
     async def _unpaid_or_budget_refusal(self) -> Optional[JSONResponse]:
-        try:
-            unpaid = await self.unpaid_jobs()
-        except Exception as e:
-            logger.warning("Could not count unpaid jobs: %s", type(e).__name__)
-            unpaid = self.settings.max_awaiting_payment  # fail closed
-        if self.settings.max_awaiting_payment >= 0 and unpaid >= self.settings.max_awaiting_payment:
-            self.counters["unpaid_limit"] += 1
-            return _refuse(429, "Too many unpaid jobs; try again later", 300)
-        problem = await self.budget_problem()
-        if problem:
-            self.counters["budget_refused"] += 1
-            now = datetime.now(timezone.utc).timestamp()
-            return _refuse(503, f"Not accepting jobs: {problem}; try again after 00:00 UTC",
-                           max(60, math.ceil(end_of_utc_day(now) - now)))
-        return None
+        async with self._admission:  # count and admit in one step: concurrent requests cannot both take the last slot
+            limit = self.settings.max_awaiting_payment
+            if limit >= 0:
+                try:
+                    unpaid = await self.unpaid_jobs()
+                except Exception as e:
+                    logger.warning("Could not count unpaid jobs: %s", type(e).__name__)
+                    unpaid = limit  # fail closed
+                if unpaid + self.admitting >= limit:
+                    self.counters["unpaid_limit"] += 1
+                    return _refuse(429, "Too many unpaid jobs; try again later", 300)
+            problem = await self.budget_problem()
+            if problem:
+                self.counters["budget_refused"] += 1
+                now = datetime.now(timezone.utc).timestamp()
+                return _refuse(503, f"Not accepting jobs: {problem}; try again after 00:00 UTC",
+                               max(60, math.ceil(end_of_utc_day(now) - now)))
+            self.admitting += 1
+            return None
 
 
 def _refuse(status: int, detail: str, retry_after: Optional[int] = None) -> JSONResponse:
@@ -178,4 +203,8 @@ def add_job_gate(app: FastAPI, gate: StartJobGate) -> None:
             refusal = await gate.check(request)
             if refusal is not None:
                 return refusal
+            try:
+                return await call_next(request)
+            finally:
+                gate.release()
         return await call_next(request)

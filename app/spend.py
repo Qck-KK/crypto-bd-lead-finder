@@ -34,6 +34,11 @@ class SpendLedgerUnavailable(TregError):
     """The call's pending cost could not be written to the ledger; the call is not sent."""
 
 
+class BudgetUnavailable(RuntimeError):
+    """BL-33: the attempt did not get its full worst-case budget (cap used up, or ledger unreadable). The job makes
+    no treg call and fails, so the buyer's payment stays refundable; it never runs on part of its budget."""
+
+
 class JobBudget:
     def __init__(self, granted: float = math.inf, progress: Optional[Progress] = None):
         self.granted = granted

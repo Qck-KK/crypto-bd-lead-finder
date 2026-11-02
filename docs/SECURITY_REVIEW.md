@@ -128,6 +128,17 @@ Facts from treg's guide (skill.md, read 2026-11-02), not yet verified against th
 1. ~~BL-08~~ fixed in code; confirm the amount check in the deployed 0.29 Payment Service source.
 2. ~~BL-09~~ fixed in code: recovery treats a submit-in-progress as submitted.
 3. ~~BL-13~~ fixed in code: reservations, every call metered, missing cost header = max cost.
-4. ~~BL-15~~ fixed in code (rate limits and unpaid-order cap); ~~BL-33~~ fixed in code (budget check before
-   payment). Still open: BL-16 / BL-17 (generic error messages, hide docs).
+4. ~~BL-15~~ fixed in code (rate limits and unpaid-order cap).
+   - **Expired orders:** since iteration 12 the unpaid-order cap counts only orders whose pay-by time has not
+     passed (preflight B1), and admissions are counted under a lock.
+   - **Per-client = total:** the per-client limit equals the total (30/h) because the proxy hides client
+     addresses; forwarded headers are untrusted.
+
+   ~~BL-33~~ fixed in code: a budget check before payment; at execution, all-or-nothing reservations.
+   - **No partial run:** a paid job without its whole budget makes no treg call, submits no result and fails
+     (refundable).
+   - **No double refund:** the agent never authorizes or sends refunds, so it cannot refund twice.
+   - **Refund timing:** the escrow refund itself is not yet observed on Preprod.
+
+   Still open: BL-16 / BL-17 (generic error messages, hide docs).
 5. Run `pip-audit` and record the result here.

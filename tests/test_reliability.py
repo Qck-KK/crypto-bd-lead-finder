@@ -19,6 +19,7 @@ from app.job_store import recover_jobs
 from app.logs import RedactFilter, job_tag_var
 from app.pricing import TUSDM_UNIT
 from app.server import ReliableAgentServer, check_payment
+from app.spend import BudgetUnavailable
 from app.treg_client import TregError
 from conftest import CHAIN_ID, FakeGemini
 
@@ -90,7 +91,7 @@ async def test_daily_cap_reached_makes_no_treg_call_at_all(settings, gemini, _fr
                                     "leads": 1, "llm_used": True, "outcome": "delivered", "price_tusdm": 0.27})
     apollo = respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}, headers=FREE))
     routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
-    with pytest.raises(TregError, match="daily spend budget used up"):
+    with pytest.raises(BudgetUnavailable, match="data budget"):
         await process_job("buyer-cap", INPUT, dataclasses.replace(settings, daily_spend_cap_usd=1.0))
     assert not apollo.called and not routed.called
     row = _fresh_ledger.jobs[_tag("buyer-cap")]
@@ -98,25 +99,27 @@ async def test_daily_cap_reached_makes_no_treg_call_at_all(settings, gemini, _fr
 
 
 @respx.mock
-async def test_nearly_used_up_cap_skips_the_paid_search(settings, gemini, _fresh_ledger):
+async def test_a_job_never_runs_on_part_of_its_budget(settings, gemini, _fresh_ledger):
+    """BL-33 (owner decision): part of the budget left = no treg call, the job fails and stays refundable."""
     now = time.time()
     await _fresh_ledger.record_job({"tag": "old", "tier": "standard", "company": "x", "started_at": now,
-                                    "finished_at": now, "duration_ms": 1, "treg_usd": 0.9905, "enrich_usd": 0.0,
+                                    "finished_at": now, "duration_ms": 1, "treg_usd": 0.81, "enrich_usd": 0.0,
                                     "leads": 1, "llm_used": True, "outcome": "delivered", "price_tusdm": 0.27})
     apollo = respx.post(APOLLO_URL).mock(side_effect=_apollo)
-    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
-    # 0.0095 left: no Apollo call (max 0.01) fits, so probe and Apollo search are skipped; the routed search is
-    # sent with the rest as its max cost and, without a cost header, counts at exactly that.
-    await process_job("buyer-near", INPUT, settings)
-    assert not apollo.called
-    assert routed.calls.last.request.headers["X-Treg-Route-Max-Cost"] == "0.0095"
-    assert await _fresh_ledger.spend_today() == pytest.approx(1.0)
+    routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}},
+                                                                     headers=FREE))
+    # $0.19 left, the job needs $0.20 (4 probes + Apollo search + routed budget): not run at all.
+    with pytest.raises(BudgetUnavailable):
+        await process_job("buyer-near", INPUT, settings)
+    assert not apollo.called and not routed.called
+    row = _fresh_ledger.jobs[_tag("buyer-near")]
+    assert row["outcome"] == "failed" and row["treg_usd"] == 0
+    assert [a["reserved_usd"] for a in _fresh_ledger.attempts.values()] == [0.0]  # no partial hold
+    assert await _fresh_ledger.spend_today() == pytest.approx(0.81)
 
-    _fresh_ledger.jobs["old"]["treg_usd"] = 0.9705  # with buyer-near's 0.0095: 0.02 left
-    routed.mock(return_value=httpx.Response(200, json={"output": {"people": []}}, headers={"X-Treg-Cost-Micro": "0"}))
+    _fresh_ledger.jobs["old"]["treg_usd"] = 0.80  # exactly one job's budget left: it runs with all of it
     result = await process_job("buyer-near-2", INPUT, settings)
-    assert apollo.called  # Apollo fits now and is free, so the routed search gets the whole 0.02
-    assert routed.calls.last.request.headers["X-Treg-Route-Max-Cost"] == "0.0200"
+    assert apollo.called and routed.calls.last.request.headers["X-Treg-Route-Max-Cost"] == "0.1500"
     assert "Jane" in result and await _fresh_ledger.spend_today() <= 1.0 + 1e-9
 
 
@@ -129,7 +132,7 @@ async def test_unreadable_ledger_makes_no_treg_call(settings, gemini, monkeypatc
     ledger_module.set_ledger(Broken())
     apollo = respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}, headers=FREE))
     routed = respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
-    with pytest.raises(TregError):
+    with pytest.raises(BudgetUnavailable):  # fail closed
         await process_job("buyer-x", INPUT, settings)
     assert not apollo.called and not routed.called
 

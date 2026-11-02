@@ -363,9 +363,17 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
       ceiling (`max_spend_ceiling`: $0.22 standard, + enrichment budget on Pro);
     - the ledger cannot be read.
   - **Check, not reservation:** unpaid orders hold nothing. The value is cached for 15 s.
-  - **Remaining window:** the cap can still run out between `/start_job` and payment; that job reserves 0 and
-    fails (refundable), as before.
-  - **Tests:** `tests/test_job_gate.py`; mutation check caught.
+  - **Remaining window:** the cap can still run out between `/start_job` and payment.
+  - **Iteration 12 (owner decision): no partial execution.**
+    - `ledger.reserve` grants all of a job's ceiling or nothing.
+    - Without the whole budget, or with an unreadable ledger, `_run_job` raises `BudgetUnavailable` before any
+      treg call; the SDK marks the job failed and submits no result, so the escrow stays refundable.
+    - The agent never moves funds (no `authorize_refund`), so it cannot refund twice.
+    - A failed job is never re-run by recovery.
+  - **Tests:** `tests/test_job_gate.py`, `tests/test_admission.py` (concurrent paid jobs: grants are 0 or whole;
+    the real SDK path fails once, submits nothing, and is not re-run after restarts),
+    `tests/test_reliability.py`; mutation checks caught.
+  - **Not verified:** the buyer actually getting the refund back from the escrow (Preprod integration test).
 - **Evidence:** since BL-13 a job whose reservation is 0 makes no treg call and fails
   ("daily spend budget used up"); `/availability` still says `available`.
 - **Impact:** The buyer pays, gets no result and must wait for the refund window. Rare while the cap
@@ -535,7 +543,8 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 ### BL-15 `/start_job` is open and unthrottled
 - **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 11, 2026-11-02; not deployed)
 - **Resolution (iteration 11):** `app/job_gate.py`, before any payment request, answers 429 with Retry-After.
-  - **Rate limits:** sliding one-hour windows per client (`START_JOB_PER_CLIENT_PER_HOUR`, 10) and per agent
+  - **Rate limits:** sliding one-hour windows per client (`START_JOB_PER_CLIENT_PER_HOUR`, 30 since iteration 12:
+    = total, provisional behind the proxy) and per agent
     (`START_JOB_PER_HOUR`, 30).
   - **Unpaid orders:** at most `MAX_AWAITING_PAYMENT` (30) awaiting payment, counted from job storage; fails
     closed.
@@ -589,6 +598,7 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 8 | 2026-11-02 | BL-10 | Fixed in code (`c464d8d`); 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 | 9 | 2026-11-02 | BL-13 | Fixed in code (`4fd86b5`); 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
 | 10 | 2026-11-02 | BL-34, BL-35, BL-36, BL-37 (review H1, M1, M2, M3, L1-L3); BL-14 | Fixed in code (`15a0862`); 252 tests pass (incl. 13 PostgreSQL on a throwaway cluster); 12 of 12 mutation checks caught. Not deployed. |
+| 12 | 2026-11-02 | Preflight B1; BL-33 all-or-nothing; D1 defaults | Fixed in code; 285 tests pass twice (incl. 14 PostgreSQL); 22 of 22 mutation checks caught. `docs/DEPLOY_PREFLIGHT.md` updated. Not deployed. |
 | 11 | 2026-11-02 | BL-33, BL-15; deployment review | Fixed in code; 268 tests pass (incl. 14 PostgreSQL, one an in-place upgrade of an `a97ca3e` database); 16 of 16 mutation checks caught. `docs/DEPLOY_REVIEW.md`. Not deployed. |
 
 ## Roadmap (owner, 2026-11-02)

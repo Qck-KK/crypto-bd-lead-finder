@@ -67,7 +67,9 @@ class Settings:
     # Operator switch: refuse new jobs (/start_job 503, /availability unavailable), e.g. before a rollback.
     pause_new_jobs: bool = False
     # /start_job limits before a payment request is created (BL-15), per agent process; -1 = no limit.
-    start_job_per_client_per_hour: int = 10
+    # Per-client = total for now: behind the InstaBox proxy every request comes from one address (preflight D1),
+    # and forwarded-address headers are not trusted. Not yet checked against real /start_job traffic.
+    start_job_per_client_per_hour: int = 30
     start_job_per_hour: int = 30
     max_awaiting_payment: int = 30
     # Header whose first entry identifies the client behind a proxy (e.g. X-Forwarded-For); empty = peer address.
@@ -121,7 +123,7 @@ class Settings:
             attempt_timeout_s=max(60.0, _float("ATTEMPT_TIMEOUT_S", 1800.0)),
             trust_uncharged_refusals=_bool("TREG_TRUST_UNCHARGED_REFUSALS"),
             pause_new_jobs=_bool("PAUSE_NEW_JOBS"),
-            start_job_per_client_per_hour=_int("START_JOB_PER_CLIENT_PER_HOUR", 10),
+            start_job_per_client_per_hour=_int("START_JOB_PER_CLIENT_PER_HOUR", 30),
             start_job_per_hour=_int("START_JOB_PER_HOUR", 30),
             max_awaiting_payment=_int("MAX_AWAITING_PAYMENT", 30),
             rate_limit_client_header=os.getenv("RATE_LIMIT_CLIENT_HEADER", "").strip(),

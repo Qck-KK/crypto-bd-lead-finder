@@ -112,12 +112,14 @@ async def test_pro_enrichment_skipped_when_daily_cap_is_used_up(settings, monkey
     enrich = respx.post(url__startswith=ENRICH_URL).mock(return_value=httpx.Response(200, json={"matches": []}))
     monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
 
-    # 0.02 left today: the (free) Apollo calls fit, one enrichment match (~0.026) does not.
-    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.02)
-    data = _extract_json(await process_job("buyer", {"company": "Acme Labs", "role": "BD",
-                                                     "company_domain": "acme.io"}, pro))
-    assert not enrich.called
-    assert data["enrichment"]["status"] == "daily spend cap reached" and data["enrichment"]["enriched"] == 0
+    # A Pro job needs its whole ceiling ($0.20 search + $0.30 enrichment); $0.49 left runs nothing (BL-33).
+    from app.spend import BudgetUnavailable
+
+    apollo = respx.routes[0]
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.49)
+    with pytest.raises(BudgetUnavailable):
+        await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}, pro)
+    assert not enrich.called and not apollo.called
 
 
 @respx.mock
@@ -127,13 +129,14 @@ async def test_pro_enrichment_is_limited_to_what_the_reservation_has_left(settin
         200, json={"matches": []}, headers={"X-Treg-Cost-Micro": "52000"}))
     monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
 
-    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.06)
+    # Exactly the Pro ceiling left ($0.50): the job runs with its whole enrichment budget.
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.50)
     await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}, pro)
     req = enrich.calls.last.request
-    assert len(json.loads(req.content)["details"]) == 2  # 0.06 granted, Apollo free: 2 x 0.026 fit
-    assert req.headers["X-Treg-Route-Max-Cost"] == "0.0570"
+    assert len(json.loads(req.content)["details"]) == 5  # every masked lead, well within $0.30
+    assert req.headers["X-Treg-Route-Max-Cost"] == "0.1350"
     row = next(iter(_fresh_ledger.jobs.values()))
-    assert row["enrich_usd"] == pytest.approx(0.052) and await _fresh_ledger.spend_today() <= 0.06 + 1e-9
+    assert row["enrich_usd"] == pytest.approx(0.052) and await _fresh_ledger.spend_today() <= 0.50 + 1e-9
 
 
 async def test_standard_report_has_no_enrichment_line(settings):

@@ -21,7 +21,7 @@ from .resolver import candidate_domains, resolve_company
 from .router import find_leads, person_hash, public_view
 from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
-from .spend import JobBudget
+from .spend import BudgetUnavailable, JobBudget
 from .treg_client import APOLLO_MAX_COST_USD, search_apollo
 from .verify import apply_verification, verify_lead
 
@@ -252,8 +252,8 @@ async def _reserve(settings: Settings, tag: str, attempt_id: str, want_usd: floa
         logger.warning("Spend ledger unavailable, no treg calls for this job: %s", type(e).__name__)
         return 0.0
     if granted + 1e-9 < want_usd:
-        logger.warning("Daily spend cap %.2f USD: reserved %.4f of %.4f USD for this job",
-                       settings.daily_spend_cap_usd, granted, want_usd)
+        logger.warning("Daily spend cap %.2f USD: no budget of %.4f USD left for this job; it is not run",
+                       settings.daily_spend_cap_usd, want_usd)
     return granted
 
 
@@ -278,7 +278,13 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
         suppressed = frozenset()
 
     # Reserve before the first treg call (the resolver probe). Every attempt has its own hold.
-    budget.granted = await _reserve(settings, tag, attempt_id, _spend_ceiling(settings, company, domain), company)
+    want = _spend_ceiling(settings, company, domain)
+    budget.granted = await _reserve(settings, tag, attempt_id, want, company)
+    if budget.granted + 1e-9 < want:
+        # BL-33: never run a paid job on part of its budget. No treg call is made; the job fails (the SDK marks it
+        # failed and submits no result), so the payment stays refundable.
+        raise BudgetUnavailable("Today's data budget cannot cover this job; it was not run and no result will be "
+                                "submitted, so the payment can be refunded.")
     resolved = await resolve_company(company, domain,
                                      _apollo_probe(settings, tag, budget) if settings.treg_token else None)
     routed = await find_leads(settings, company, role, resolved, tag, suppressed=suppressed, budget=budget)

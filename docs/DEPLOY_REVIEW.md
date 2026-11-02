@@ -12,8 +12,8 @@ certificate.
 | BL-02/03/04/06 | Reports: unidentifiable leads capped at Medium, `score_breakdown`, `profile_type`, stricter company matching. The JSON gains keys; none are removed. |
 | BL-10 | Gemini call bounded at 45 s, then template drafts. |
 | BL-13, BL-34 to BL-37 | Spend reservations per attempt. A job with no grant makes no treg call and fails (refundable). Runs are cancelled after `ATTEMPT_TIMEOUT_S` (30 min). |
-| BL-33 | `/availability` unavailable and `/start_job` 503 while today's shared budget is below one job's worst case ($0.22 standard). |
-| BL-15 | `/start_job` 429 above 10 per client per hour, 30 per agent per hour, or 30 orders awaiting payment. |
+| BL-33 | `/availability` unavailable and `/start_job` 503 while today's shared budget is below one job's worst case ($0.22 standard). A paid job that does not get its whole budget at execution is not run (no treg call, no result, failed, refundable); there is no partial execution. |
+| BL-15 | `/start_job` 429 above 30 per client per hour (provisional: = total behind the proxy), 30 per agent per hour, or 30 orders awaiting payment whose pay-by time has not passed. |
 | BL-36 | Job identity includes tier and payment id. Results stored by the old version are used only for orders created before the upgrade. |
 
 ## Database migration
@@ -42,19 +42,18 @@ certificate.
   | `ATTEMPT_TIMEOUT_S` | 1800 |
   | `TREG_TRUST_UNCHARGED_REFUSALS` | false |
   | `PAUSE_NEW_JOBS` | false |
-  | `START_JOB_PER_CLIENT_PER_HOUR` | 10 |
+  | `START_JOB_PER_CLIENT_PER_HOUR` | 30 |
   | `START_JOB_PER_HOUR` | 30 |
   | `MAX_AWAITING_PAYMENT` | 30 |
   | `RATE_LIMIT_CLIENT_HEADER` | empty |
 
 - **Changed default:** `ENRICH_BUDGET_USD` falls back to 0 when unset (was 0.30). The server's
   `agent-pro.env` sets 0 explicitly.
-- **Per-client limit behind the proxy:** behind the InstaBox proxy the connecting address may be the proxy's,
-  and orders relayed by Sokosumi share its address. The per-client limit (10/h) may then act as a total of
-  10/h per agent.
-  - **Before deploying,** check the client addresses in the logs (pre-deploy check 3).
-  - If they are all one address, set `START_JOB_PER_CLIENT_PER_HOUR` equal to `START_JOB_PER_HOUR`.
-  - If the proxy forwards the real address, set `RATE_LIMIT_CLIENT_HEADER`.
+- **Per-client limit behind the proxy:** the preflight found every request from one private address, the
+  proxy's. The default is therefore 30 = the total (owner decision D1), with no server env change needed.
+  - **Untrusted header:** forwarded-address headers are not trusted (`RATE_LIMIT_CLIENT_HEADER` empty).
+  - **Provisional:** not yet checked against real `/start_job` traffic; watch `bdlf_start_job_total` after
+    the deploy.
 
 ## Both containers together
 

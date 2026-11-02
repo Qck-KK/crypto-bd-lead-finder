@@ -31,6 +31,23 @@ async def _client(monkeypatch, led=None, **env):
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://agent")
 
 
+def _future_pay_by(monkeypatch, delay=None, fail=False):
+    """The Payment Service's answer to the SDK's payment request, with a pay-by time 12 h ahead."""
+    import masumi.server
+
+    async def create(self, metadata=None):
+        if delay:
+            await asyncio.sleep(delay)
+        if fail:
+            raise RuntimeError("payment service down")
+        ms = int((time.time() + 12 * 3600) * 1000)
+        return {"data": {"blockchainIdentifier": f"chain-{time.time_ns()}", "payByTime": str(ms),
+                         "submitResultTime": str(ms + 1), "unlockTime": str(ms + 2),
+                         "externalDisputeUnlockTime": str(ms + 3), "sellerVKey": "test-vkey"}}
+
+    monkeypatch.setattr(masumi.server.Payment, "create_payment_request", create)
+
+
 class _Clock:
     def __init__(self):
         self.t = 1000.0
@@ -144,6 +161,7 @@ async def test_the_window_slides(settings):
 
 
 async def test_unpaid_orders_are_capped_and_refusals_use_no_rate_slot(env, payment_mock, monkeypatch):
+    _future_pay_by(monkeypatch)
     async with await _client(monkeypatch, MAX_AWAITING_PAYMENT="2", START_JOB_PER_CLIENT_PER_HOUR="3") as c:
         answers = [await c.post("/start_job", json=START) for _ in range(4)]
     # Two orders await payment; the next two are refused for that, without using the client's 3 slots

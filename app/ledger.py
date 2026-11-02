@@ -106,10 +106,11 @@ class MemoryLedger:
 
     async def reserve(self, attempt_id: str, tag: str, tier: str, want_usd: float, cap_usd: float,
                       lifetime_s: float, company: str = "", now: Optional[float] = None) -> float:
-        """Opens this attempt's own hold of up to want_usd and returns the grant. Never touches another
-        attempt's row. No await suspends between reading and writing, so this is atomic within one event loop."""
+        """Opens this attempt's own hold and returns the grant: all of want_usd if today's cap still has it,
+        else 0 (BL-33: no job runs on part of its budget). Never touches another attempt's row. No await suspends
+        between reading and writing, so this is atomic within one event loop."""
         now = now or time.time()
-        grant = max(0.0, min(want_usd, cap_usd - await self.spend_today(now)))
+        grant = want_usd if cap_usd - await self.spend_today(now) + 1e-9 >= want_usd else 0.0
         self.attempts[attempt_id] = {
             "attempt_id": attempt_id, "job_tag": tag, "tier": tier, "company": company, "created_at": now,
             "counts_until": end_of_utc_day(now + lifetime_s), "reserved_usd": grant, "confirmed_usd": 0.0,
@@ -299,7 +300,7 @@ class PostgresLedger(MemoryLedger):
             # Held until commit: no other agent reads today's total between our read and our insert.
             await conn.execute("SELECT pg_advisory_xact_lock($1)", SPEND_LOCK_KEY)
             spent = float(await conn.fetchval(_SPEND_TODAY_SQL) or 0)
-            grant = max(0.0, min(want_usd, cap_usd - spent))
+            grant = want_usd if cap_usd - spent + 1e-9 >= want_usd else 0.0  # all or nothing (BL-33)
             # Always a new row (attempt_id is unique per run): a retry never reuses or shrinks an earlier hold.
             await conn.execute(
                 "INSERT INTO spend_attempts (attempt_id, job_tag, tier, company, reserved_usd, counts_until) VALUES "

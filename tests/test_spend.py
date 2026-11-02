@@ -21,7 +21,7 @@ from app.job_identity import job_tag
 from app.ledger import MemoryLedger, end_of_utc_day
 from app.resolver import ResolvedCompany
 from app.router import find_leads
-from app.spend import JobBudget, SpendCapReached, SpendLedgerUnavailable
+from app.spend import BudgetUnavailable, JobBudget, SpendCapReached, SpendLedgerUnavailable
 from app.treg_client import (APOLLO_MAX_COST_USD, TregError, TregSearchResult, floor_cost, idempotency_key,
                              search_apollo, search_people)
 from conftest import FakeGemini
@@ -313,11 +313,12 @@ async def test_a_call_cancelled_mid_flight_stays_charged_at_its_max_cost():
 async def test_every_attempt_gets_its_own_hold_in_order():
     led = MemoryLedger()
     grants = [await led.reserve(f"a{i}", f"tag{i}", "standard", 0.2, 0.5, LIFETIME) for i in range(4)]
-    assert grants == pytest.approx([0.2, 0.2, 0.1, 0.0])
-    assert await led.spend_today() == pytest.approx(0.5) and await led.reserved_today() == pytest.approx(0.5)
+    assert grants == pytest.approx([0.2, 0.2, 0.0, 0.0])  # all or nothing: 0.1 left is not a grant (BL-33)
+    assert await led.spend_today() == pytest.approx(0.4) and await led.reserved_today() == pytest.approx(0.4)
     assert await led.settle("a0", _row("tag0", treg=0.05), _snap(confirmed=0.05)) == "settled"
-    assert led.attempts["a0"]["status"] == "settled" and await led.spend_today() == pytest.approx(0.35)
-    assert await led.reserve("a4", "tag4", "standard", 0.2, 0.5, LIFETIME) == pytest.approx(0.15)
+    assert led.attempts["a0"]["status"] == "settled" and await led.spend_today() == pytest.approx(0.25)
+    assert await led.reserve("a4", "tag4", "standard", 0.2, 0.5, LIFETIME) == pytest.approx(0.2)
+    assert await led.reserve("a5", "tag5", "standard", 0.2, 0.5, LIFETIME) == 0.0  # 0.05 left
 
 
 async def test_a_retry_never_releases_or_reduces_the_previous_attempts_hold():
@@ -329,7 +330,8 @@ async def test_a_retry_never_releases_or_reduces_the_previous_attempts_hold():
     first = led.attempts["first"]
     assert first["status"] == "open" and first["reserved_usd"] == pytest.approx(0.2)
     assert await led.spend_today() == pytest.approx(0.2)  # the crashed attempt still counts in full
-    assert await led.reserve("other", "U", "standard", 0.5, 0.5, LIFETIME) == pytest.approx(0.3)
+    assert await led.reserve("other", "U", "standard", 0.31, 0.5, LIFETIME) == 0.0  # only 0.3 left
+    assert await led.reserve("fits", "V", "standard", 0.3, 0.5, LIFETIME) == pytest.approx(0.3)
 
 
 async def test_an_open_hold_keeps_counting_after_midnight():
@@ -338,7 +340,8 @@ async def test_an_open_hold_keeps_counting_after_midnight():
     await led.reserve("late", "A", "standard", 0.2, 0.3, LIFETIME, now=evening)
     after = evening + 15  # 00:00:05 next UTC day
     assert await led.spend_today(now=after) == pytest.approx(0.2)
-    assert await led.reserve("early", "B", "standard", 0.2, 0.3, LIFETIME, now=after) == pytest.approx(0.1)
+    assert await led.reserve("early", "B", "standard", 0.2, 0.3, LIFETIME, now=after) == 0.0  # only 0.1 left
+    assert await led.reserve("small", "B", "standard", 0.1, 0.3, LIFETIME, now=after) == pytest.approx(0.1)
     # A settles after midnight: its actual spend counts on the new day.
     await led.settle("late", _row("A", treg=0.15, now=after + 30), _snap(confirmed=0.15))
     assert await led.spend_today(now=after + 31) == pytest.approx(0.15 + 0.1)
@@ -375,12 +378,12 @@ async def test_two_concurrent_jobs_cannot_both_spend_a_one_job_cap(settings, gem
 
     apollo = respx.post(APOLLO_URL).mock(side_effect=_apollo())
     routed = respx.post(ROUTED_URL).mock(side_effect=slow_routed)
-    capped = dataclasses.replace(settings, daily_spend_cap_usd=settings.job_budget_usd)
+    capped = dataclasses.replace(settings, daily_spend_cap_usd=_spend_ceiling(settings, "Acme Labs", "acme.io"))
     out = await asyncio.gather(process_job("buyer-a", INPUT, capped), process_job("buyer-b", INPUT, capped),
                                return_exceptions=True)
     delivered = [r for r in out if isinstance(r, str)]
-    failed = [r for r in out if isinstance(r, TregError)]
-    assert len(delivered) == 1 and len(failed) == 1 and "daily spend budget used up" in str(failed[0])
+    failed = [r for r in out if isinstance(r, BudgetUnavailable)]
+    assert len(delivered) == 1 and len(failed) == 1
     assert routed.call_count == 1 and apollo.call_count == 2
     assert await _fresh_ledger.spend_today() <= capped.daily_spend_cap_usd + 1e-9
     assert not _open(_fresh_ledger)
@@ -440,8 +443,10 @@ async def test_crash_after_a_paid_call_then_a_zero_cost_replay_retry(settings, g
     assert first["status"] == "open"  # never released by the retry
     assert await _fresh_ledger.spend_today() == pytest.approx(ceiling)  # the first hold, in full
     # Another job only gets what the cap leaves next to the crashed attempt's hold.
-    assert await _fresh_ledger.reserve("x", "X", "standard", 1.0, capped.daily_spend_cap_usd, LIFETIME) == \
-        pytest.approx(ceiling + 0.05)
+    assert await _fresh_ledger.reserve("x", "X", "standard", ceiling + 0.06, capped.daily_spend_cap_usd,
+                                       LIFETIME) == 0.0
+    assert await _fresh_ledger.reserve("y", "Y", "standard", ceiling + 0.05, capped.daily_spend_cap_usd,
+                                       LIFETIME) == pytest.approx(ceiling + 0.05)
 
     # At expiry the first attempt's known charge is recorded: the books show the $0.15 really spent.
     await _fresh_ledger.expire_attempts(now=first["counts_until"])
@@ -463,7 +468,7 @@ async def test_repeated_crashes_each_keep_their_own_hold(settings, gemini, _fres
     # With a cap that the three holds use up, a fourth attempt gets nothing: no treg call, the job fails.
     tight = dataclasses.replace(settings, daily_spend_cap_usd=3 * ceiling)
     calls = respx.calls.call_count
-    with pytest.raises(TregError, match="daily spend budget used up"):
+    with pytest.raises(BudgetUnavailable):
         await process_job("buyer", INPUT, tight)
     assert respx.calls.call_count == calls and len(_open(_fresh_ledger)) == 3
     monkeypatch.undo()
@@ -611,9 +616,9 @@ async def test_postgres_parallel_attempts_from_two_agents_hold_the_cap():
         cap = base + 0.5
         grants = await asyncio.gather(*[(pro if i % 2 else standard).reserve(
             f"test-bl34-a{i}", "test-bl34-job", "standard", 0.15, cap, LIFETIME) for i in range(8)])
-        assert sum(grants) == pytest.approx(0.5)
-        assert sorted(round(g, 4) for g in grants) == [0.0] * 4 + [0.05, 0.15, 0.15, 0.15]
-        assert await pro.spend_today() == pytest.approx(cap)
+        assert sum(grants) == pytest.approx(0.45)  # all or nothing: the last 0.05 is not granted (BL-33)
+        assert sorted(round(g, 4) for g in grants) == [0.0] * 5 + [0.15, 0.15, 0.15]
+        assert await pro.spend_today() == pytest.approx(cap - 0.05)
     finally:
         await _pg_close(standard, pro, pool)
 
