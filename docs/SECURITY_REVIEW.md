@@ -128,5 +128,6 @@ Facts from treg's guide (skill.md, read 2026-11-02), not yet verified against th
 1. ~~BL-08~~ fixed in code; confirm the amount check in the deployed 0.29 Payment Service source.
 2. ~~BL-09~~ fixed in code: recovery treats a submit-in-progress as submitted.
 3. ~~BL-13~~ fixed in code: reservations, every call metered, missing cost header = max cost.
-4. BL-15 / BL-16 / BL-17: rate limit `/start_job`, generic error messages, hide docs.
+4. ~~BL-15~~ fixed in code (rate limits and unpaid-order cap); ~~BL-33~~ fixed in code (budget check before
+   payment). Still open: BL-16 / BL-17 (generic error messages, hide docs).
 5. Run `pip-audit` and record the result here.

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -24,7 +25,8 @@ from app import feedback, ledger, masumi_compat  # noqa: E402
 from app.job_store import PostgresJobStorage, recover_jobs  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
 from app.report import FOOTER  # noqa: E402
-from app.server import Health, ReliableAgentServer, add_admin_routes, add_sale_guard  # noqa: E402
+from app.job_gate import StartJobGate, add_job_gate  # noqa: E402
+from app.server import Health, ReliableAgentServer, add_admin_routes  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
 EXPIRE_INTERVAL_S = 600
@@ -65,11 +67,14 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
     health = health or Health(os.getenv("PAYMENT_SERVICE_URL", ""))
     name = "Crypto BD Lead Finder Pro" if settings.is_pro else "Crypto BD Lead Finder"
     blocked = settings.sale_blocked_reason()
+    gate: Optional[StartJobGate] = None  # set once the server exists
 
     async def availability() -> dict:
-        # The registry hides agents that report unavailable, so buyers cannot pay while we are degraded.
-        if blocked:
-            return {"status": "unavailable", "type": "masumi-agent", "message": f"{name} is paused: {blocked}"}
+        # The registry hides agents that report unavailable, so buyers cannot pay while we are degraded,
+        # paused or out of today's data budget (BL-33).
+        problem = await gate.availability_problem() if gate else blocked
+        if problem:
+            return {"status": "unavailable", "type": "masumi-agent", "message": f"{name} is paused: {problem}"}
         status, detail = await health.check()
         message = f"{name} is operational" if status == "available" else f"{name} is degraded: {detail}"
         return {"status": status, "type": "masumi-agent", "message": message}
@@ -89,8 +94,9 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
     app = server.get_app()
     admin_token = os.getenv("ADMIN_TOKEN") or os.getenv("FEEDBACK_ADMIN_TOKEN", "")
     feedback.add_feedback_routes(app, settings.feedback_secret, admin_token)
-    add_admin_routes(app, server, settings, admin_token)
-    add_sale_guard(app, blocked)
+    gate = StartJobGate(settings, blocked, server)
+    add_admin_routes(app, server, settings, admin_token, gate)
+    add_job_gate(app, gate)
     if not settings.feedback_secret:
         logging.getLogger(__name__).warning("FEEDBACK_SECRET not set: reports carry no feedback link")
 

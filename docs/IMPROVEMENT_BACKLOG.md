@@ -355,7 +355,17 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Concurrency test with two jobs and a cap of one job budget; test for missing header.
 
 ### BL-33 A job sold with the daily cap used up fails after payment
-- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Open (found in iteration 9)
+- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Fixed in code (iteration 11, 2026-11-02; not deployed)
+- **Resolution (iteration 11):** `app/job_gate.py` runs before the SDK creates a payment request.
+  - **When it refuses:** `/availability` reports unavailable and `/start_job` answers 503 (Retry-After until
+    00:00 UTC) when either:
+    - what is left of today's shared cap (settled + open holds, both agents) is below the agent's largest job
+      ceiling (`max_spend_ceiling`: $0.22 standard, + enrichment budget on Pro);
+    - the ledger cannot be read.
+  - **Check, not reservation:** unpaid orders hold nothing. The value is cached for 15 s.
+  - **Remaining window:** the cap can still run out between `/start_job` and payment; that job reserves 0 and
+    fails (refundable), as before.
+  - **Tests:** `tests/test_job_gate.py`; mutation check caught.
 - **Evidence:** since BL-13 a job whose reservation is 0 makes no treg call and fails
   ("daily spend budget used up"); `/availability` still says `available`.
 - **Impact:** The buyer pays, gets no result and must wait for the refund window. Rare while the cap
@@ -523,7 +533,19 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   accepted for Preprod only (HANDOFF).
 
 ### BL-15 `/start_job` is open and unthrottled
-- **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 11, 2026-11-02; not deployed)
+- **Resolution (iteration 11):** `app/job_gate.py`, before any payment request, answers 429 with Retry-After.
+  - **Rate limits:** sliding one-hour windows per client (`START_JOB_PER_CLIENT_PER_HOUR`, 10) and per agent
+    (`START_JOB_PER_HOUR`, 30).
+  - **Unpaid orders:** at most `MAX_AWAITING_PAYMENT` (30) awaiting payment, counted from job storage; fails
+    closed.
+  - **Client key:** the peer address, or the first entry of `RATE_LIMIT_CLIENT_HEADER` only when configured,
+    so a spoofed header cannot bypass the limit.
+  - **Race-free:** slots are taken before the awaits and returned on refusal.
+  - **Per process:** limits are in memory and reset on restart.
+  - **Proxy caveat:** behind a proxy or Sokosumi relay all requests may share one address, so the per-client
+    limit then acts as a total (see `docs/DEPLOY_REVIEW.md`).
+  - **Tests:** `tests/test_job_gate.py`; 3 mutation checks caught.
 - **Evidence:** masumi SDK `server.py:186-226`: every call creates a Payment Service record and a monitoring
   task that polls every 10 s until the 12 h pay deadline; no rate limit in front.
 - **Proposed solution:** Per-IP rate limit on `/start_job` and a cap on concurrently monitored unpaid jobs.
@@ -566,7 +588,8 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 7 | 2026-11-02 | BL-06 | Fixed in code (`4d02fca`); 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 | 8 | 2026-11-02 | BL-10 | Fixed in code (`c464d8d`); 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 | 9 | 2026-11-02 | BL-13 | Fixed in code (`4fd86b5`); 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
-| 10 | 2026-11-02 | BL-34, BL-35, BL-36, BL-37 (review H1, M1, M2, M3, L1-L3); BL-14 | Fixed in code; 252 tests pass (incl. 13 PostgreSQL on a throwaway cluster); 12 of 12 mutation checks caught. Not deployed. |
+| 10 | 2026-11-02 | BL-34, BL-35, BL-36, BL-37 (review H1, M1, M2, M3, L1-L3); BL-14 | Fixed in code (`15a0862`); 252 tests pass (incl. 13 PostgreSQL on a throwaway cluster); 12 of 12 mutation checks caught. Not deployed. |
+| 11 | 2026-11-02 | BL-33, BL-15; deployment review | Fixed in code; 268 tests pass (incl. 14 PostgreSQL, one an in-place upgrade of an `a97ca3e` database); 16 of 16 mutation checks caught. `docs/DEPLOY_REVIEW.md`. Not deployed. |
 
 ## Roadmap (owner, 2026-11-02)
 
@@ -588,9 +611,6 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 
 ## Recommended next iteration (Step C)
 
-Before any deploy: send treg the questions in `SECURITY_REVIEW.md` ("Open questions for treg").
-BL-33: since BL-13 a job arriving with the daily cap used up makes no treg call and fails, so the buyer pays
-and waits for a refund. Reporting `unavailable` while today's remainder is below one job's ceiling would stop
-such sales before payment (the BL-01 sale guard is the pattern; no payment code involved). After that:
-BL-07 (role synonyms), BL-11 (fallback counter in `/metrics`; the live model check needs the server). BL-32
-is a short follow-up once the V2 state semantics are confirmed.
+Deploy per `docs/DEPLOY_REVIEW.md` (owner decisions and read-only checks first), then the Preprod integration
+test (roadmap step 5). Open with treg: the questions in `docs/TREG_BILLING.md`. After that: BL-07 (role
+synonyms), BL-11 (fallback counter in `/metrics`), BL-16/BL-17, BL-32.

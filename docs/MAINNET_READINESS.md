@@ -32,6 +32,8 @@ Pro preflight FAILs "Pro enrichment enabled" while `ENRICH_BUDGET_USD` is 0, on 
 | Recovery never resubmits | Fixed in code, not deployed; no fault injected on the live stack yet | BL-09 |
 | Spend cap holds under concurrency, crashes, retries and UTC midnight | Fixed in code, not deployed; a hard bound needs treg's answers (SECURITY_REVIEW "Open questions for treg") | BL-13, BL-34, BL-35, BL-37 |
 | Orders never share results, holds or treg keys (tier + payment id) | Fixed in code, not deployed | BL-36 (BL-14) |
+| No sale without budget for the job; `/start_job` rate-limited | Fixed in code, not deployed; client identity behind the proxy to check | BL-33, BL-15 |
+| treg-side daily cap set, auto top-up off | Not set: treg reports no daily cap for the team (2026-11-02) | `docs/TREG_BILLING.md` |
 | Rollback path with open holds | Runbook and script (`docs/ROLLBACK.md`), not exercised on the server | BL-36 |
 | Gemini timeout | Fixed in code, not deployed (45 s, `GEMINI_TIMEOUT_S`) | BL-10 |
 | At least 3 real users tested the output | Open | BL-22 |

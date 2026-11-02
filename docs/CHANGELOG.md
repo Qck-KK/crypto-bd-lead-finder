@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Iteration 11 — BL-33, BL-15 and the deployment review (2026-11-02)
+- Before the SDK creates a payment request, `/start_job` now checks today's shared data budget (BL-33):
+  - when what is left (settled spend + open holds, both agents) cannot cover one job's worst case ($0.22
+    standard), `/availability` reports unavailable and `/start_job` answers 503 until 00:00 UTC;
+  - it does the same when the ledger cannot be read;
+  - unpaid orders hold no budget.
+- Rate limits on `/start_job` (BL-15), all with Retry-After:
+  - 10 per client and 30 per agent per hour (429);
+  - at most 30 orders awaiting payment (429).
+  - The client is the peer address unless `RATE_LIMIT_CLIENT_HEADER` names a trusted proxy header.
+- `/admin/stats` → `start_job_gate`, `/metrics` → `bdlf_start_job_total{result=…}`.
+- `docs/DEPLOY_REVIEW.md`: behaviour changes, migration (tested in place on an `a97ca3e` database), env vars,
+  read-only pre-deploy checks, deploy, verification and rollback steps.
+
 ### Iteration 10 — BL-34 to BL-37: attempt-level spend holds, midnight-safe expiry, order identity (2026-11-02)
 - Every run of a job (attempt) has its own spend reservation (`spend_attempts`). A retry gets a new one, and
   settling closes only its own, so a crashed attempt's possible spend is never released by its retry

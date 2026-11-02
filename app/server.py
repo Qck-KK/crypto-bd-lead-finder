@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import PlainTextResponse
 from masumi import MasumiAgentServer
 
 from . import feedback
@@ -139,25 +139,12 @@ class Health:
         return self._state
 
 
-def add_sale_guard(app: FastAPI, reason: Optional[str]) -> None:
-    """Refuse new jobs (/start_job: 503) while the agent must not be sold. /availability reports the same
-    reason, so the registry hides the agent; paid jobs already in progress are not affected."""
-    if not reason:
-        return
-    logger.warning("Not accepting new jobs: %s", reason)
-
-    @app.middleware("http")
-    async def sale_guard(request: Request, call_next):
-        if request.method == "POST" and request.url.path.rstrip("/") == "/start_job":
-            return JSONResponse(status_code=503, content={"detail": f"Not accepting jobs: {reason}"})
-        return await call_next(request)
-
-
 def _admin_ok(request: Request, token: str) -> bool:
     return bool(token) and hmac.compare_digest(request.headers.get("x-admin-token", ""), token)
 
 
-def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, admin_token: str) -> None:
+def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, admin_token: str,
+                     gate: Any = None) -> None:
     async def snapshot() -> dict:
         ledger = get_ledger()
         jobs = await server.job_manager.list_jobs()
@@ -174,6 +161,7 @@ def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, a
                 "spend_today_usd": round(await ledger.spend_today(), 4),
                 "reserved_today_usd": round(await ledger.reserved_today(), 4),
                 "daily_spend_cap_usd": settings.daily_spend_cap_usd,
+                "start_job_gate": dict(gate.counters) if gate else {},
                 "ledger": await ledger.stats(7, tier=settings.tier),
                 "feedback": fb}
 
@@ -196,6 +184,8 @@ def add_admin_routes(app: FastAPI, server: ReliableAgentServer, settings: Any, a
                   f'bdlf_reserved_today_usd{{tier="{s["tier"]}"}} {s["reserved_today_usd"]}',
                   f'bdlf_daily_spend_cap_usd{{tier="{s["tier"]}"}} {s["daily_spend_cap_usd"]}',
                   f'bdlf_cost_assumed_calls_7d{{tier="{s["tier"]}"}} {t["cost_assumed_calls"]}',
+                  *[f'bdlf_start_job_total{{tier="{s["tier"]}",result="{k}"}} {v}'
+                    for k, v in s["start_job_gate"].items()],
                   f'bdlf_jobs_7d{{tier="{s["tier"]}"}} {t["jobs"]}',
                   f'bdlf_cost_7d_usd{{tier="{s["tier"]}"}} {t["cost_usd"]}',
                   f'bdlf_revenue_7d_tusdm{{tier="{s["tier"]}"}} {t["revenue_tusdm"]}']

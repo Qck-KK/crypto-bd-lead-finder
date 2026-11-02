@@ -44,7 +44,12 @@ def registrable_root(domain: str) -> str:
     return ".".join(labels[-keep:])
 
 
-def candidate_domains(company: str, given: Optional[str], max_guesses: int = 4) -> list[str]:
+MAX_GUESSES = 4
+# At most: the given domain, its registrable root and MAX_GUESSES guesses (each one probe).
+MAX_DOMAIN_CANDIDATES = 2 + MAX_GUESSES
+
+
+def candidate_domains(company: str, given: Optional[str], max_guesses: int = MAX_GUESSES) -> list[str]:
     given = normalize_domain(given)
     first = [given, registrable_root(given)] if given else []
     return list(dict.fromkeys(d for d in first + guess_domains(company, None, max_guesses) if d))
