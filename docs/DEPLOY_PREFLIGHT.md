@@ -45,6 +45,9 @@
     - a failed creation gives its slot back;
     - expired orders through the real SDK path do not block.
   - **Mutation checks:** counting expired orders, ignoring in-flight admissions, never releasing — all caught.
+- **Final local review:** two hardenings with regression tests that fail on the previous code.
+  - **Cancelled admission:** a request cancelled while waiting for admission returns its rate slots.
+  - **Pay-by values that are not a time** (boolean, NaN, infinite, ≤ 0) count, as the docs said.
 - **Remaining:** expired unpaid orders still keep their SDK monitoring task (polling every 10 s) until the next
   restart. That is SDK behaviour and a resource cost only; tracked as W10.
 

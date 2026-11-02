@@ -81,11 +81,26 @@ async def test_expired_unpaid_orders_do_not_hold_the_30_slots(settings):
     (T - 60, False),
     (str(int((T + 60) * 1000)), True),  # as the Payment Service string
     (None, True), ("not a time", True),  # unreadable: counts (fail closed)
+    (True, True), (float("nan"), True), (float("inf"), True), (0, True), (-5, True),  # not a time: counts
 ])
 async def test_pay_by_boundary(settings, pay_by, counts):
     gate = _gate(settings, [pay_by], 1)
     assert await gate.unpaid_jobs() == (1 if counts else 0)
     assert (await gate.check(_request()) is None) is (not counts)
+
+
+async def test_a_cancelled_admission_gives_its_rate_slots_back(settings):
+    gate = _gate(settings, [], 30)
+    gate.settings = dataclasses.replace(gate.settings, start_job_per_client_per_hour=1, start_job_per_hour=1)
+    gate.total.limit = 1
+    async with gate._admission:  # another request is being admitted
+        waiting = asyncio.create_task(gate.check(_request()))
+        await asyncio.sleep(0.01)
+        waiting.cancel()  # the client goes away while waiting
+        with pytest.raises(asyncio.CancelledError):
+            await waiting
+    assert gate.total.empty() and all(w.empty() for w in gate.clients.values()) and gate.admitting == 0
+    assert await gate.check(_request()) is None  # the slot is free again
 
 
 async def test_an_order_frees_its_slot_when_its_pay_by_passes(settings):

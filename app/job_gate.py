@@ -44,6 +44,15 @@ logger = logging.getLogger(__name__)
 HOUR = 3600.0
 
 
+def _pay_by_s(value: Any) -> Optional[float]:
+    """The Payment Service pay-by time in epoch seconds, or None when it cannot be trusted (then the order counts).
+    Booleans, non-finite and non-positive values are not a time."""
+    if isinstance(value, bool):
+        return None
+    seconds = _epoch_s(value)
+    return seconds if seconds is not None and math.isfinite(seconds) and seconds > 0 else None
+
+
 def max_spend_ceiling(settings: Settings) -> float:
     """The largest spend ceiling any job of this agent can reserve (every domain candidate probed)."""
     enrich = settings.enrich_budget_usd if settings.enrichment_enabled else 0.0
@@ -133,7 +142,7 @@ class StartJobGate:
         now = self.wall()
         open_orders = 0
         for job in await self.server.job_manager.list_jobs("awaiting_payment"):
-            pay_by = _epoch_s(job.get("pay_by_time"))
+            pay_by = _pay_by_s(job.get("pay_by_time"))
             open_orders += 1 if pay_by is None or pay_by > now else 0
         return open_orders
 
@@ -154,12 +163,19 @@ class StartJobGate:
             if window.full():
                 self.counters["rate_limited"] += 1
                 return _refuse(429, "Too many new jobs; try again later", window.retry_after())
-        # Take the slots before the awaits below, so concurrent requests cannot all pass; give them back if refused.
+        # Take the slots before the awaits below, so concurrent requests cannot all pass; give them back if refused,
+        # and also if the request is cancelled while waiting (client gone).
         slots = (client.add(), self.total.add())
-        refusal = await self._unpaid_or_budget_refusal()
+        refusal: Optional[JSONResponse] = None
+        admitted = False
+        try:
+            refusal = await self._unpaid_or_budget_refusal()
+            admitted = refusal is None
+        finally:
+            if not admitted:
+                client.undo(slots[0])
+                self.total.undo(slots[1])
         if refusal is not None:
-            client.undo(slots[0])
-            self.total.undo(slots[1])
             return refusal
         if len(self.clients) > 10_000:  # bound memory: forget clients with no request in the last hour
             self.clients = {k: w for k, w in self.clients.items() if not w.empty()}

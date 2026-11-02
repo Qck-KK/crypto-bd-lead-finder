@@ -546,7 +546,8 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   - **Rate limits:** sliding one-hour windows per client (`START_JOB_PER_CLIENT_PER_HOUR`, 30 since iteration 12:
     = total, provisional behind the proxy) and per agent
     (`START_JOB_PER_HOUR`, 30).
-  - **Unpaid orders:** at most `MAX_AWAITING_PAYMENT` (30) awaiting payment, counted from job storage; fails
+  - **Unpaid orders:** at most `MAX_AWAITING_PAYMENT` (30) awaiting payment whose Payment Service pay-by time has
+    not passed (since iteration 12, preflight B1), counted from job storage plus admissions in progress; fails
     closed.
   - **Client key:** the peer address, or the first entry of `RATE_LIMIT_CLIENT_HEADER` only when configured,
     so a spoofed header cannot bypass the limit.

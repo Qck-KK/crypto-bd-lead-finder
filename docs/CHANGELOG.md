@@ -16,6 +16,10 @@
   stay untrusted.
 - The payment check, escrow, refunds and the payment state machine are unchanged; the agent never calls
   authorize-refund.
+- Final local review:
+  - a request cancelled while waiting for admission (client gone) now gives its rate slots back;
+  - pay-by values that are not a time (boolean, NaN, infinite, non-positive) count as unreadable, so the
+    order holds its slot (fail closed).
 
 ### Iteration 11 — BL-33, BL-15 and the deployment review (2026-11-02)
 - Before the SDK creates a payment request, `/start_job` now checks today's shared data budget (BL-33):
