@@ -21,7 +21,7 @@ def _outreach(item) -> dict:
 def build_payload(company: str, role: Optional[str], leads: list[dict], drafts: list,
                   resolution: Optional[dict] = None, search: Optional[list[dict]] = None,
                   dropped_low_score: int = 0, tier: str = "standard", feedback_url: Optional[str] = None,
-                  suppressed: int = 0) -> dict:
+                  suppressed: int = 0, enrichment: Optional[dict] = None) -> dict:
     labels = Counter(lead.get("quality", "") for lead in leads)
     verified = Counter((lead.get("verification") or {}).get("status", "") for lead in leads)
     return {
@@ -35,6 +35,7 @@ def build_payload(company: str, role: Optional[str], leads: list[dict], drafts: 
         "leads": [{**lead, "outreach": _outreach(d), "outreach_draft": _outreach(d)["email"]}
                   for lead, d in zip(leads, drafts)],
         "search": search or [],
+        "enrichment": enrichment,
         "feedback_url": feedback_url,
         "data_source": DATA_SOURCE,
         "usage_notice": USAGE_NOTICE,
@@ -52,6 +53,21 @@ def _link(url: str) -> str:
     return f"[{_md(label)}]({url})"
 
 
+def enrichment_text(e: dict) -> str:
+    """One line on what enrichment did for this job, in the buyer's terms."""
+    as_is = "names and links are delivered as the provider returned them"
+    status = e.get("status")
+    if status == "off":
+        return f"off on this agent; {as_is}"
+    if status == "not needed":
+        return "not needed: every lead already has a full name and a LinkedIn profile"
+    if status == "ok":
+        return f"{e['enriched']} of {e['candidates']} leads with a masked name or no LinkedIn profile completed"
+    if status == "daily spend cap reached":
+        return f"skipped for this job (daily spend cap reached); {as_is}"
+    return f"provider unavailable for this job; {as_is}"
+
+
 def render_markdown(payload: dict) -> str:
     q, res, summary, leads = payload["query"], payload["resolution"], payload["summary"], payload["leads"]
     target = f"{q['role']} at {q['company']}" if q.get("role") else q["company"]
@@ -67,6 +83,8 @@ def render_markdown(payload: dict) -> str:
     if leads and "verification" in leads[0]:
         lines.append(f"- **Verification:** {summary.get('verified', 0)} verified · {summary.get('likely', 0)} likely "
                      f"· {summary['delivered'] - summary.get('verified', 0) - summary.get('likely', 0)} unverified")
+    if payload.get("enrichment") and leads:
+        lines.append(f"- **Enrichment:** {_md(enrichment_text(payload['enrichment']))}")
     if payload.get("feedback_url"):
         lines.append(f"- **Rate these leads:** [feedback form]({payload['feedback_url']})")
     lines.append("")
@@ -148,9 +166,9 @@ def render_markdown(payload: dict) -> str:
 def build_result(company: str, role: Optional[str], leads: list[dict], drafts: list,
                  resolution: Optional[dict] = None, search: Optional[list[dict]] = None,
                  dropped_low_score: int = 0, tier: str = "standard", feedback_url: Optional[str] = None,
-                 suppressed: int = 0) -> str:
+                 suppressed: int = 0, enrichment: Optional[dict] = None) -> str:
     payload = build_payload(company, role, leads, drafts, resolution, search, dropped_low_score, tier,
-                            feedback_url, suppressed)
+                            feedback_url, suppressed, enrichment)
     return (
         render_markdown(payload)
         + "\n## Data (JSON)\n\n```json\n"

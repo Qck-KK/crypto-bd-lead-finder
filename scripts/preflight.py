@@ -20,6 +20,7 @@ load_dotenv()
 
 from app.pricing import TUSDM_DECIMALS, estimate  # noqa: E402
 from app.server import expected_payment  # noqa: E402
+from app.treg_client import APOLLO_ENRICH_USD_PER_MATCH  # noqa: E402
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
@@ -43,7 +44,7 @@ def check_secrets() -> list:
 def check_economics(tier: str, target: str) -> list:
     e = estimate(tier)
     cap = float(_env("DAILY_SPEND_CAP_USD") or 1.0)
-    enrich = float(_env("ENRICH_BUDGET_USD") or (0.30 if tier == "pro" else 0))
+    enrich = float(_env("ENRICH_BUDGET_USD") or 0)
     margin = e["price_tusdm"] / e["cost_usd"] if e["cost_usd"] else float("inf")
     out = [
         (PASS if margin >= 1.5 else FAIL, "price covers worst-case cost",
@@ -51,9 +52,15 @@ def check_economics(tier: str, target: str) -> list:
         (PASS if cap > 0 else WARN, "daily spend cap", f"{cap} USD/day"),
     ]
     if tier == "pro":
+        if enrich < APOLLO_ENRICH_USD_PER_MATCH:
+            # Without enrichment Pro sells the standard results at the Pro price.
+            sold = "still sold: PRO_ALLOW_WITHOUT_ENRICHMENT is set" if _env("PRO_ALLOW_WITHOUT_ENRICHMENT").lower() in (
+                "1", "true", "yes") else "agent reports unavailable and refuses new jobs"
+            out.append((FAIL, "Pro enrichment enabled", f"ENRICH_BUDGET_USD={enrich}; {sold}"))
+            return out
         out.append((PASS if enrich <= e["price_tusdm"] * 0.5 else WARN, "enrichment budget vs price",
                     f"{enrich} USD per job"))
-        if target == "Preprod" and enrich > 0:
+        if target == "Preprod":
             out.append((WARN, "enrichment on Preprod", "test-token buyers can spend real treg balance"))
     return out
 

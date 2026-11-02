@@ -19,14 +19,14 @@ launch list stays in `MAINNET_CHECKLIST.md`; this file tracks the evidence. Issu
 | data providers | WARN | WARN | treg / upstream terms for paid resale (BL-21) |
 | real-money test | WARN | WARN | First Mainnet sale by hand |
 
-Preprod preflight: 0 FAIL, 0 WARN on both agents. Note: Preprod preflight passes although Pro's
-enrichment is off (BL-01); it must fail in that state.
+Preprod preflight: 0 FAIL, 0 WARN on both agents (deployed code). Since iteration 1 (BL-01, not deployed yet),
+Pro preflight FAILs "Pro enrichment enabled" while `ENRICH_BUDGET_USD` is 0, on both targets.
 
 ## Gates before any Mainnet step
 
 | Gate | Status | Backlog |
 |---|---|---|
-| Pro delivers what it advertises, or is not sold | Open | BL-01 |
+| Pro delivers what it advertises, or is not sold | Fixed in code, not deployed; enrichment budget is the owner's decision | BL-01 |
 | Quality labels honest (masked / no LinkedIn never High) | Open | BL-02, BL-03 |
 | Payment amount guarantee documented and enforced | Open | BL-08 |
 | Recovery never resubmits | Open | BL-09 |

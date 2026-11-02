@@ -66,9 +66,11 @@ async def test_pro_job_enriches_filters_personal_data_and_verifies(settings, mon
         headers={"X-Treg-Cost-Micro": "52000"}))
     monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
 
-    pro = dataclasses.replace(settings, tier="pro")
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30)
     result = await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}, pro)
     data = _extract_json(result)
+    assert data["enrichment"] == {"enabled": True, "candidates": 5, "enriched": 2, "status": "ok"}
+    assert "**Enrichment:** 2 of 5 leads with a masked name or no LinkedIn profile completed" in result
 
     req = enrich.calls.last.request
     assert "reveal_personal_emails=false" in str(req.url) and "reveal_phone_number=false" in str(req.url)
@@ -83,6 +85,44 @@ async def test_pro_job_enriches_filters_personal_data_and_verifies(settings, mon
     for private in ("@acme.io", "gmail", "Main Street", "Berlin", "twitter", "1234567", "7654321", "HQ Road"):
         assert private not in result, private
     assert data["tier"] == "pro" and result.startswith("# BD leads (Pro)")
+
+
+@respx.mock
+async def test_pro_without_budget_says_enrichment_is_off_and_pays_nothing(settings, monkeypatch):
+    respx.post(APOLLO_URL).mock(side_effect=_apollo_handler)
+    respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    enrich = respx.post(url__startswith=ENRICH_URL).mock(return_value=httpx.Response(200, json={"matches": []}))
+    monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
+
+    pro = dataclasses.replace(settings, tier="pro")  # default budget: 0, enrichment off
+    result = await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}, pro)
+    data = _extract_json(result)
+    assert not enrich.called
+    assert data["enrichment"] == {"enabled": False, "candidates": 5, "enriched": 0, "status": "off"}
+    assert "**Enrichment:** off on this agent" in result
+    assert not any("enrich" in step["provider"] for step in data["search"])
+
+
+@respx.mock
+async def test_pro_enrichment_skipped_when_daily_cap_is_used_up(settings, monkeypatch):
+    respx.post(APOLLO_URL).mock(side_effect=_apollo_handler)
+    enrich = respx.post(url__startswith=ENRICH_URL).mock(return_value=httpx.Response(200, json={"matches": []}))
+    monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(text="{}"))
+
+    pro = dataclasses.replace(settings, tier="pro", enrich_budget_usd=0.30, daily_spend_cap_usd=0.0)
+    data = _extract_json(await process_job("buyer", {"company": "Acme Labs", "role": "BD",
+                                                     "company_domain": "acme.io"}, pro))
+    assert not enrich.called
+    assert data["enrichment"]["status"] == "daily spend cap reached" and data["enrichment"]["enriched"] == 0
+
+
+async def test_standard_report_has_no_enrichment_line(settings):
+    with respx.mock:
+        respx.post(APOLLO_URL).mock(side_effect=_apollo_handler)
+        respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+        result = await process_job("buyer", {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"},
+                                   dataclasses.replace(settings, gemini_api_key=""))
+    assert _extract_json(result)["enrichment"] is None and "Enrichment:" not in result
 
 
 async def test_enrichment_budget_limits_people_and_errors_are_soft(settings):

@@ -16,6 +16,7 @@ load_dotenv()
 
 from app.pricing import estimate  # noqa: E402
 from app.report import FOOTER  # noqa: E402
+from app.settings import Settings  # noqa: E402
 
 # The registry caps the description at 250 characters.
 DESCRIPTION = (
@@ -42,6 +43,9 @@ def main() -> None:
     print()
     print(f"Cost estimate (worst case): treg ${e['treg_usd']} + enrich ${e['enrich_usd']} + LLM ${e['llm_usd']} "
           f"= ${e['cost_usd']} per job; x{e['markup']} = {e['suggested_price_tusdm']} suggested")
+    if tier == "pro" and not Settings.from_env().enrichment_enabled:
+        print("\nWARNING: enrichment is off (ENRICH_BUDGET_USD). This description and price assume it is on; "
+              "do not register Pro until it is, or the listing promises what the agent does not deliver.")
 
 
 if __name__ == "__main__":

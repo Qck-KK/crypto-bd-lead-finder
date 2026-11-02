@@ -74,9 +74,13 @@ def test_input_schema_mentions_source_and_limit():
     assert ids == ["company", "company_domain", "role", "pitch", "sender_name", "sender_company", "tone", "notice"]
     notice = INPUT_SCHEMA["input_data"][-1]["data"]["description"]
     assert "treg.to" in notice and "B2B professional outreach only" in notice and "10" in notice
-    assert "quality score" in notice and "masked" in notice and "Pro agent" in notice
-    pro_notice = input_schema("pro")["input_data"][-1]["data"]["description"]
-    assert "full names and LinkedIn" in pro_notice and "verification" in pro_notice
+    assert "quality score" in notice and "masked" in notice and "verification" in notice
+    # The standard agent cannot know whether Pro enrichment is on, so it makes no Pro promise.
+    assert "Pro" not in notice
+    off = input_schema("pro")["input_data"][-1]["data"]["description"]
+    assert "Enrichment is currently off" in off and "masked" in off and "LinkedIn profiles" not in off
+    on = input_schema("pro", 4)["input_data"][-1]["data"]["description"]
+    assert "masked names and missing LinkedIn profiles for up to 4 people" in on and "currently off" not in on
     tone = INPUT_SCHEMA["input_data"][6]
     assert tone["type"] == "option" and tone["data"]["values"] == ["friendly", "formal", "concise"]
     domain_field = INPUT_SCHEMA["input_data"][1]

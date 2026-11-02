@@ -10,7 +10,7 @@ from typing import Any, Optional
 from . import feedback
 from .compliance import normalize_domain
 from .drafts import TONES, OutreachContext, write_outreach
-from .enrich import enrich_leads
+from .enrich import enrich_leads, needs_enrichment
 from .ledger import get_ledger
 from .logs import job_tag_var
 from .pricing import estimate
@@ -24,23 +24,25 @@ from .verify import apply_verification, verify_lead
 
 logger = logging.getLogger(__name__)
 
-_WHAT_YOU_GET = {
-    "standard": (
-        f"Up to {MAX_PEOPLE_HARD_CAP} people, ranked by a quality score and checked against the company's domain, "
-        "each with name, title, company, profile link, and a personalized email (with subject) and LinkedIn note. "
-        "Public professional data only: no personal phone numbers, emails or addresses. Some names may be partly "
-        "masked by the data provider; the Pro agent adds full names and LinkedIn profiles."
-    ),
-    "pro": (
-        f"Up to {MAX_PEOPLE_HARD_CAP} people, ranked by a quality score, with full names and LinkedIn profiles "
-        "where available, a verification status (employer, current role, data freshness), and a personalized "
-        "email (with subject) and LinkedIn note for each. Public professional data only: no personal phone "
-        "numbers, emails or addresses."
-    ),
-}
+_NO_CONTACTS = "Public professional data only: no personal phone numbers, emails or addresses."
+_AS_PROVIDED = ("Some names may be partly masked by the data provider, and people without a public profile link "
+                "to the company website.")
 
 
-def input_schema(tier: str = "standard") -> dict:
+def what_you_get(tier: str = "standard", enrich_people: int = 0) -> str:
+    """Buyer-facing description of the output. Promises enrichment only when it is actually on."""
+    base = (f"Up to {MAX_PEOPLE_HARD_CAP} people, ranked by a quality score and checked against the company's "
+            "domain, each with name, title, company, profile link, a verification status (employer, current role, "
+            "data freshness), and a personalized email (with subject) and LinkedIn note.")
+    if tier != "pro":
+        return f"{base} {_AS_PROVIDED} {_NO_CONTACTS}"
+    if enrich_people:
+        return (f"{base} Pro completes masked names and missing LinkedIn profiles for up to {enrich_people} people "
+                f"per job where the provider has them. {_NO_CONTACTS}")
+    return f"{base} Enrichment is currently off on this agent. {_AS_PROVIDED} {_NO_CONTACTS}"
+
+
+def input_schema(tier: str = "standard", enrich_people: int = 0) -> dict:
     return {"input_data": [
         {
             "id": "company",
@@ -115,7 +117,7 @@ def input_schema(tier: str = "standard") -> dict:
             "id": "notice",
             "type": "none",
             "name": "What you get",
-            "data": {"description": f"{_WHAT_YOU_GET['pro' if tier == 'pro' else 'standard']} {FOOTER}"},
+            "data": {"description": f"{what_you_get(tier, enrich_people)} {FOOTER}"},
             # Display-only; masumi treats fields without "optional" as required.
             "validations": [{"validation": "optional", "value": "true"}],
         },
@@ -243,12 +245,21 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     metrics["treg_usd"] = routed.spent_usd
     leads = routed.leads
 
+    # What the report says about enrichment (Pro only); never claims work that did not happen.
     enrichment = None
-    if settings.is_pro and leads and settings.treg_token:
-        enrich_settings = dataclasses.replace(
-            settings, enrich_budget_usd=min(settings.enrich_budget_usd, max(0.0, remaining - routed.spent_usd)))
-        enrichment = await enrich_leads(enrich_settings, leads, company, resolved.domain or "", tag)
-        metrics["enrich_usd"] = enrichment["spent_usd"]
+    if settings.is_pro:
+        candidates = sum(needs_enrichment(lead) for lead in leads)
+        enrichment = {"enabled": settings.enrichment_enabled, "candidates": candidates, "enriched": 0,
+                      "status": "off" if not settings.enrichment_enabled else "not needed" if not candidates else "ok"}
+        if settings.enrichment_enabled and candidates:
+            enrich_settings = dataclasses.replace(
+                settings, enrich_budget_usd=min(settings.enrich_budget_usd, max(0.0, remaining - routed.spent_usd)))
+            if enrich_settings.enrich_people_per_job == 0:
+                enrichment["status"] = "daily spend cap reached"
+            else:
+                done = await enrich_leads(enrich_settings, leads, company, resolved.domain or "", tag)
+                metrics["enrich_usd"] = done["spent_usd"]
+                enrichment.update(enriched=done["enriched"], status=done["error"] or "ok")
         for lead in leads:
             if lead.get("_signals", {}).get("enriched"):
                 score, reasons = score_lead(public_view(lead), role, lead["_signals"].get("evidence", "none"))
@@ -279,9 +290,6 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     search = [{"provider": s.provider, "query": s.query, "rows": s.rows, "kept": s.kept,
                "status": "ok" if not s.error else "skipped" if "budget" in s.error else "unavailable"}
               for s in routed.steps]
-    if enrichment is not None:
-        search.append({"provider": "apollo enrich", "query": f"{enrichment['enriched']} leads", "rows": 0,
-                       "kept": enrichment["enriched"], "status": enrichment["error"] or "ok"})
     return build_result(company, role, [public_view(lead) for lead in leads], outreach, resolution, search,
                         routed.dropped_low_score, tier=settings.tier, feedback_url=link,
-                        suppressed=routed.suppressed)
+                        suppressed=routed.suppressed, enrichment=enrichment)

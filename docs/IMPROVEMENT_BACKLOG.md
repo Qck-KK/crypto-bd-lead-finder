@@ -64,7 +64,19 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 ## Phase 1 — Make it correct (prioritised)
 
 ### BL-01 Pro tier sells features that are switched off
-- **Phase:** 1 · **Severity:** Critical · **Effort:** S (honest interim) / M (enrichment on) · **Status:** Open (needs owner decision)
+- **Phase:** 1 · **Severity:** Critical · **Effort:** S (honest interim) / M (enrichment on) · **Status:** Fixed in code
+  (iteration 1, 2026-11-02; not deployed yet). Owner decision on enabling paid enrichment still open: on Preprod
+  it stays off, so Pro is not sold.
+- **Resolution (iteration 1):** `Settings.enrich_people_per_job` / `enrichment_enabled` (budget for ≥ 1 match and
+  a treg token) is the single source of truth; the default budget is now 0. The input form promises enrichment
+  only when it is on and the Standard form makes no Pro promise (`app/agent.py` `what_you_get`). Each Pro report
+  has an **Enrichment** line and an `enrichment` JSON block (off / `n of m` completed / not needed / skipped by the
+  daily cap / provider unavailable); the old "apollo enrich … ok" search note is gone. While enrichment is off, Pro
+  `/availability` reports `unavailable` and `/start_job` answers 503 (`app/server.py` `add_sale_guard`), unless
+  `PRO_ALLOW_WITHOUT_ENRICHMENT=true`. Preflight FAILs "Pro enrichment enabled" in both cases;
+  `scripts/registration_values.py` warns before registering an unenriched Pro. Tests: `tests/test_tiers.py`,
+  `tests/test_upsell.py`, `tests/test_agent.py`. Remaining: the on-chain registry description still mentions full
+  names and LinkedIn (changes only by re-registration; the listing is hidden while Pro is unavailable).
 - **Description:** Pro (1.05 tUSDM) delivers the same leads as Standard (0.27). Its advertised difference
   — full names and LinkedIn profiles — comes only from enrichment, which is off on the deployment.
 - **Evidence:** `agent-pro` env `ENRICH_BUDGET_USD=0`; `app/enrich.py:27-28` (`affordable = 0` → no calls);
@@ -281,8 +293,8 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 ### BL-25 Backups and recovery drills
 - **Severity:** Medium · **Effort:** S · **Status:** In Progress
 - **Evidence:** compose `backup` service deployed 2026-11-01 23:50 UTC (daily, keeps 7); restore drill
-  2026-11-02 matched live row counts; changes not committed; off-host copy is a manual `scp`.
-- **Proposed solution:** Commit; schedule or document the off-host copy; repeat the drill monthly.
+  2026-11-02 matched live row counts; committed in `e3e6749`; off-host copy is a manual `scp`.
+- **Proposed solution:** Schedule or document the off-host copy; repeat the drill monthly.
 
 ### BL-26 Single server
 - **Severity:** Medium · **Effort:** L · **Status:** Open
@@ -321,8 +333,9 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 
 ### BL-30 Deployment drift
 - **Severity:** Medium · **Effort:** S · **Status:** Open
-- **Evidence:** the server copy is not a git checkout (files copied by hand); `README.md`, `deploy/backup.sh`,
-  `deploy/docker-compose.yml`, `MAINNET_CHECKLIST.md` are modified but uncommitted.
+- **Evidence:** the server copy is not a git checkout (files copied by hand). The four uncommitted files were
+  committed on 2026-11-02 (`e3e6749`), so the repo matches what is deployed for `deploy/`; the app code on the
+  server is still the image built from `c6d8eba`-era sources.
 - **Proposed solution:** Deploy from a tagged commit; record the deployed commit in `/admin/stats`.
 
 ### BL-31 Coupling to masumi SDK internals
@@ -330,9 +343,13 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Evidence:** `app/server.py`, `app/job_store.py:174` use `_handle_payment_confirmed`, `_payment_instances`;
   `masumi==1.2.0` pinned; FastAPI `on_event` deprecation warnings in the test run.
 
+## Iteration log
+
+| # | Date | Issue | Result |
+|---|---|---|---|
+| 1 | 2026-11-02 | BL-01 | Fixed in code; 112 tests pass (incl. PostgreSQL). Not deployed. |
+
 ## Recommended next iteration (Step C)
 
-BL-01 is the highest-priority issue, but its main fix (enable paid enrichment, stop selling Pro, or
-re-register) is an owner decision under AGENT_LOOP.md §7. The part that needs no decision, and only stops
-false claims: make all served text and the report reflect whether enrichment is actually on, and make
-preflight FAIL for Pro while it is off. After that: BL-02 + BL-03 (honest quality labels), then BL-08.
+BL-02 + BL-03 together (honest quality labels and profile links: one scoring/report change, same tests),
+then BL-08 (payment amount guarantee).

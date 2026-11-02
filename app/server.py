@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from masumi import MasumiAgentServer
 
 from . import feedback
@@ -114,6 +114,20 @@ class Health:
         self._state = ("unavailable", "; ".join(problems)) if problems else ("available", "ok")
         self._at = time.monotonic()
         return self._state
+
+
+def add_sale_guard(app: FastAPI, reason: Optional[str]) -> None:
+    """Refuse new jobs (/start_job: 503) while the agent must not be sold. /availability reports the same
+    reason, so the registry hides the agent; paid jobs already in progress are not affected."""
+    if not reason:
+        return
+    logger.warning("Not accepting new jobs: %s", reason)
+
+    @app.middleware("http")
+    async def sale_guard(request: Request, call_next):
+        if request.method == "POST" and request.url.path.rstrip("/") == "/start_job":
+            return JSONResponse(status_code=503, content={"detail": f"Not accepting jobs: {reason}"})
+        return await call_next(request)
 
 
 def _admin_ok(request: Request, token: str) -> bool:

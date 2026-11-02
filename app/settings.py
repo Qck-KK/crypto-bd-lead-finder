@@ -1,7 +1,11 @@
 """Runtime settings, read from environment variables (.env in local development)."""
 
+import math
 import os
 from dataclasses import dataclass
+from typing import Optional
+
+from .treg_client import APOLLO_ENRICH_USD_PER_MATCH
 
 # Hard compliance cap: never return more people than this, whatever the env says.
 MAX_PEOPLE_HARD_CAP = 10
@@ -20,6 +24,10 @@ def _int(name: str, default: int) -> int:
     return int(raw) if raw not in (None, "") else default
 
 
+def _bool(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes")
+
+
 @dataclass(frozen=True)
 class Settings:
     treg_token: str
@@ -35,9 +43,13 @@ class Settings:
     min_lead_score: int = 35
     min_leads_before_paid: int = 5
     # "standard" or "pro". Pro is registered as its own agent with its own price and adds
-    # enrichment (full names, LinkedIn) within enrich_budget_usd per job.
+    # enrichment (full names, LinkedIn) within enrich_budget_usd per job. Enrichment costs real treg
+    # balance, so it is off (0) unless a budget is set.
     tier: str = "standard"
-    enrich_budget_usd: float = 0.30
+    enrich_budget_usd: float = 0.0
+    # Pro without enrichment is the standard product at the Pro price, so it is not sold (it reports
+    # unavailable and refuses new jobs) unless this is set, e.g. on a test deployment.
+    pro_allow_without_enrichment: bool = False
     # Feedback links: HMAC secret and the public URL buyers open.
     feedback_secret: str = ""
     public_url: str = ""
@@ -48,6 +60,24 @@ class Settings:
     @property
     def is_pro(self) -> bool:
         return self.tier == "pro"
+
+    @property
+    def enrich_people_per_job(self) -> int:
+        """How many leads Pro can enrich per job (0 = enrichment off). Needs a treg token and a budget
+        for at least one match."""
+        if not (self.is_pro and self.treg_token):
+            return 0
+        return min(MAX_PEOPLE_HARD_CAP, math.floor(self.enrich_budget_usd / APOLLO_ENRICH_USD_PER_MATCH + 1e-9))
+
+    @property
+    def enrichment_enabled(self) -> bool:
+        return self.enrich_people_per_job > 0
+
+    def sale_blocked_reason(self) -> Optional[str]:
+        """Why this agent must not take new jobs, or None."""
+        if self.is_pro and not self.enrichment_enabled and not self.pro_allow_without_enrichment:
+            return "Pro enrichment is off (ENRICH_BUDGET_USD), so Pro would deliver the standard results"
+        return None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -64,7 +94,8 @@ class Settings:
             min_lead_score=_int("MIN_LEAD_SCORE", 35),
             min_leads_before_paid=_int("MIN_LEADS_BEFORE_PAID", 5),
             tier="pro" if os.getenv("AGENT_TIER", "standard").strip().lower() == "pro" else "standard",
-            enrich_budget_usd=_float("ENRICH_BUDGET_USD", 0.30),
+            enrich_budget_usd=_float("ENRICH_BUDGET_USD", 0.0),
+            pro_allow_without_enrichment=_bool("PRO_ALLOW_WITHOUT_ENRICHMENT"),
             feedback_secret=os.getenv("FEEDBACK_SECRET", ""),
             public_url=os.getenv("AGENT_PUBLIC_URL", "").rstrip("/"),
             daily_spend_cap_usd=_float("DAILY_SPEND_CAP_USD", 1.0),

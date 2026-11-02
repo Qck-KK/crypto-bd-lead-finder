@@ -53,6 +53,12 @@ Two agents run from the same code and are registered separately (Masumi prices a
   numbers are not requested; anything else the provider returns (work email, address, socials) is removed by
   the allowlist. A record is used only if it is the same first name at the same company. On Preprod buyers pay
   with test tokens while enrichment costs real treg balance, so `ENRICH_BUDGET_USD=0` (off) is the default.
+- **Pro is only sold with enrichment on.** Without a budget for at least one match, Pro would deliver the
+  standard results at the Pro price, so it reports `unavailable` on `/availability` (the registry hides it),
+  answers `/start_job` with 503, and preflight fails. Jobs already paid still run. The input form and the
+  report describe enrichment as it is: promised only when on, and each Pro report says what it did (off,
+  `n of m` completed, or why it was skipped). `PRO_ALLOW_WITHOUT_ENRICHMENT=true` keeps selling an
+  unenriched Pro, for test deployments only.
 - **Personalized outreach** (`app/drafts.py`): per lead a subject (≤ 60 chars), a 60–110 word email and a
   LinkedIn connection note (≤ 280 chars), from the lead's title, seniority and region plus the buyer's offer,
   name, company and tone (`friendly`, `formal`, `concise`). One Gemini call per job; templates if it fails.

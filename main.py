@@ -24,7 +24,7 @@ from app import feedback, ledger, masumi_compat  # noqa: E402
 from app.job_store import PostgresJobStorage, recover_jobs  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
 from app.report import FOOTER  # noqa: E402
-from app.server import Health, ReliableAgentServer, add_admin_routes  # noqa: E402
+from app.server import Health, ReliableAgentServer, add_admin_routes, add_sale_guard  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
 masumi_compat.install()
@@ -62,9 +62,12 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
     ledger.set_ledger(job_ledger)
     health = health or Health(os.getenv("PAYMENT_SERVICE_URL", ""))
     name = "Crypto BD Lead Finder Pro" if settings.is_pro else "Crypto BD Lead Finder"
+    blocked = settings.sale_blocked_reason()
 
     async def availability() -> dict:
         # The registry hides agents that report unavailable, so buyers cannot pay while we are degraded.
+        if blocked:
+            return {"status": "unavailable", "type": "masumi-agent", "message": f"{name} is paused: {blocked}"}
         status, detail = await health.check()
         message = f"{name} is operational" if status == "available" else f"{name} is degraded: {detail}"
         return {"status": status, "type": "masumi-agent", "message": message}
@@ -75,7 +78,7 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
         network=os.getenv("NETWORK", "Preprod"),
         job_storage=job_storage,
         start_job_handler=process_job,
-        input_schema_handler=input_schema(settings.tier),
+        input_schema_handler=input_schema(settings.tier, settings.enrich_people_per_job),
         availability_handler=availability,
         demo_handler=lambda: DEMO,
         seller_vkey=os.getenv("SELLER_VKEY"),
@@ -85,6 +88,7 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
     admin_token = os.getenv("ADMIN_TOKEN") or os.getenv("FEEDBACK_ADMIN_TOKEN", "")
     feedback.add_feedback_routes(app, settings.feedback_secret, admin_token)
     add_admin_routes(app, server, settings, admin_token)
+    add_sale_guard(app, blocked)
     if not settings.feedback_secret:
         logging.getLogger(__name__).warning("FEEDBACK_SECRET not set: reports carry no feedback link")
 
