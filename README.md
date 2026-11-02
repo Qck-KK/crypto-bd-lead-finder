@@ -62,7 +62,8 @@ Two agents run from the same code and are registered separately (Masumi prices a
   unenriched Pro, for test deployments only.
 - **Personalized outreach** (`app/drafts.py`): per lead a subject (≤ 60 chars), a 60–110 word email and a
   LinkedIn connection note (≤ 280 chars), from the lead's title, seniority and region plus the buyer's offer,
-  name, company and tone (`friendly`, `formal`, `concise`). One Gemini call per job; templates if it fails.
+  name, company and tone (`friendly`, `formal`, `concise`). One Gemini call per job, bounded by
+  `GEMINI_TIMEOUT_S` (default 45 s); templates if it fails or times out.
 - **Verification** (`app/verify.py`): no extra requests. Checks employer confirmed by domain, current role,
   record refreshed within 365 days, found by 2+ sources, LinkedIn present. Verified (+5 score), Likely, or
   Unverified (−5).

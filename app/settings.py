@@ -56,6 +56,8 @@ class Settings:
     # Circuit breaker: paid provider spend (router + enrichment) per UTC day, summed over every agent
     # that shares the database (they draw on the same treg balance).
     daily_spend_cap_usd: float = 1.0
+    # Upper bound for the Gemini drafting call; on timeout the job delivers template drafts.
+    gemini_timeout_s: float = 45.0
 
     @property
     def is_pro(self) -> bool:
@@ -99,4 +101,5 @@ class Settings:
             feedback_secret=os.getenv("FEEDBACK_SECRET", ""),
             public_url=os.getenv("AGENT_PUBLIC_URL", "").rstrip("/"),
             daily_spend_cap_usd=_float("DAILY_SPEND_CAP_USD", 1.0),
+            gemini_timeout_s=_float("GEMINI_TIMEOUT_S", 45.0),
         )

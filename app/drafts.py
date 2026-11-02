@@ -4,9 +4,11 @@ Per lead: an email subject, an email body and a LinkedIn connection note (<= 280
 Personalization uses only what the agent knows: the lead's title, seniority and region (from the
 title), the company, and the buyer's offer, name, company and chosen tone. Only those public
 fields are sent to the model, in one request for all leads. Facts are never invented. If the
-model call fails, each lead gets a template so a paid job still delivers.
+model call fails or takes longer than GEMINI_TIMEOUT_S, each lead gets a template so a paid job still
+delivers.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -23,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 LINKEDIN_NOTE_MAX = 280  # LinkedIn allows 300 characters in a connection note; keep a margin.
 TONES = ("friendly", "formal", "concise")
+# Upper bound for the one drafting call; a normal call for 10 leads takes well under this.
+DEFAULT_TIMEOUT_S = 45.0
 
 _REGIONS = {"emea": "EMEA", "apac": "APAC", "latam": "LATAM", "americas": "the Americas", "europe": "Europe",
             "asia": "Asia", "north america": "North America", "us": "the US", "uk": "the UK", "dach": "DACH"}
@@ -138,8 +142,14 @@ async def write_outreach(
     api_key: str,
     model: str,
     client: Optional[Any] = None,
+    timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> tuple[list[dict], bool]:
-    """Return (outreach dicts aligned with leads, used_llm)."""
+    """Return (outreach dicts aligned with leads, used_llm).
+
+    The model call is bounded by ``timeout_s`` (google-genai sets no timeout of its own), and any
+    failure, including a timeout or a transport error, falls back to templates: a paid job must not
+    hang or fail because of the drafts.
+    """
     if not leads:
         return [], False
 
@@ -148,7 +158,7 @@ async def write_outreach(
     if api_key or client is not None:
         try:
             client = client or genai.Client(api_key=api_key)
-            response = await client.aio.models.generate_content(
+            response = await asyncio.wait_for(client.aio.models.generate_content(
                 model=model,
                 contents=build_prompt(leads, ctx),
                 config=types.GenerateContentConfig(
@@ -158,11 +168,16 @@ async def write_outreach(
                     # Headroom for models that think before answering (2.5 Flash does by default).
                     max_output_tokens=16384,
                 ),
-            )
+            ), timeout=timeout_s)
             drafts = parse_outreach(response.text or "", len(leads))
             used_llm = bool(drafts)
-        except (errors.APIError, ValueError, KeyError, TypeError, AttributeError) as e:
-            logger.warning("Gemini drafting failed, using templates: %s", type(e).__name__)
+        except TimeoutError:
+            logger.warning("Gemini drafting timed out after %.0f s (model %s), using templates", timeout_s, model)
+        except errors.APIError as e:
+            logger.warning("Gemini drafting failed (model %s), using templates: %s %s", model, type(e).__name__,
+                           getattr(e, "code", ""))
+        except Exception as e:  # noqa: BLE001 - transport errors (httpx/aiohttp), bad JSON, odd responses
+            logger.warning("Gemini drafting failed (model %s), using templates: %s", model, type(e).__name__)
     else:
         logger.warning("GEMINI_API_KEY is not set, using template drafts")
 

@@ -1,4 +1,7 @@
+import asyncio
 import json
+from dataclasses import replace
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -53,6 +56,27 @@ async def test_full_job_output(settings, monkeypatch):
         assert private not in result, private
     assert result.rstrip().endswith("Data source: treg.to. For B2B professional outreach only.")
     assert "Jev" not in result and "TypeSafe" not in result
+
+
+@respx.mock
+async def test_hanging_gemini_still_delivers_template_drafts(settings, monkeypatch):
+    """BL-10: a model call that never returns must not keep a paid job running."""
+    mock_apollo_empty(respx)
+    respx.post(TREG_URL).mock(return_value=httpx.Response(200, json={"output": {"people": [
+        {"name": "Alice Nakamoto", "job_title": "Head of Business Development"}]}}))
+
+    async def never_returns(**kwargs):
+        await asyncio.Event().wait()
+
+    hanging = SimpleNamespace(aio=SimpleNamespace(models=SimpleNamespace(generate_content=never_returns)))
+    monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: hanging)
+
+    result = await asyncio.wait_for(
+        process_job("p", {"company": "Example Labs", "role": "BD"}, replace(settings, gemini_timeout_s=0.05)),
+        timeout=10)
+    lead = _extract_json(result)["leads"][0]
+    assert lead["outreach"]["email"].startswith("Hi Alice,")
+    assert result.rstrip().endswith("Data source: treg.to. For B2B professional outreach only.")
 
 
 @respx.mock

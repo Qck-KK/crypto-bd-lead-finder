@@ -269,7 +269,7 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     leads.sort(key=lambda lead: -lead["quality_score"])
 
     outreach, used_llm = await write_outreach(leads, ctx, api_key=settings.gemini_api_key,
-                                              model=settings.gemini_model)
+                                              model=settings.gemini_model, timeout_s=settings.gemini_timeout_s)
     metrics.update(leads=len(leads), llm_used=used_llm)
     logger.info("Delivering %d leads (tier %s, LLM outreach: %s, router spend %.4f USD, enrich %s)", len(leads),
                 settings.tier, used_llm, routed.spent_usd, enrichment)

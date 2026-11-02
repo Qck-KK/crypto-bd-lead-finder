@@ -1,8 +1,14 @@
+import asyncio
+import inspect
 import json
+from types import SimpleNamespace
 
+import httpx
 from google.genai import errors
 
-from app.drafts import LINKEDIN_NOTE_MAX, OutreachContext, build_prompt, region_of, write_outreach
+from app.drafts import (DEFAULT_TIMEOUT_S, LINKEDIN_NOTE_MAX, OutreachContext, build_prompt, region_of,
+                        write_outreach)
+from app.settings import Settings
 from conftest import FakeGemini
 
 LEADS = [
@@ -64,6 +70,48 @@ async def test_incomplete_entries_and_bad_json_fall_back():
 
     out, used_llm = await write_outreach(LEADS, CTX, api_key="k", model="m", client=FakeGemini(text="not json"))
     assert not used_llm and len(out) == 2
+
+
+class _HangingGemini:
+    """A model call that never returns (the SDK has no timeout of its own)."""
+
+    def __init__(self):
+        self.started = self.cancelled = False
+        self.aio = SimpleNamespace(models=SimpleNamespace(generate_content=self._generate))
+
+    async def _generate(self, **kwargs):
+        self.started = True
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+async def test_hanging_model_call_times_out_to_templates(caplog):
+    fake = _HangingGemini()
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    out, used_llm = await asyncio.wait_for(
+        write_outreach(LEADS, CTX, api_key="k", model="m", client=fake, timeout_s=0.05), timeout=5)
+    assert loop.time() - t0 < 2
+    assert fake.started and fake.cancelled  # the pending call is cancelled, not leaked
+    assert not used_llm and out[0]["email"].startswith("Hi Alice,") and out[1]["email"].startswith("Hi Bob,")
+    assert "timed out" in caplog.text
+
+
+async def test_transport_error_falls_back_to_templates():
+    fake = FakeGemini(exc=httpx.ConnectError("connection refused"))
+    out, used_llm = await write_outreach(LEADS, CTX, api_key="k", model="m", client=fake)
+    assert not used_llm and len(out) == 2 and out[0]["email"].startswith("Hi Alice,")
+
+
+def test_default_timeout_and_setting(monkeypatch):
+    assert inspect.signature(write_outreach).parameters["timeout_s"].default == DEFAULT_TIMEOUT_S == 45.0
+    monkeypatch.delenv("GEMINI_TIMEOUT_S", raising=False)
+    assert Settings.from_env().gemini_timeout_s == 45.0
+    monkeypatch.setenv("GEMINI_TIMEOUT_S", "12.5")
+    assert Settings.from_env().gemini_timeout_s == 12.5
 
 
 async def test_no_key_uses_templates_without_calling():

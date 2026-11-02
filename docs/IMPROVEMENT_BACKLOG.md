@@ -278,7 +278,16 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Table-driven tests per role family, including negative cases.
 
 ### BL-10 Gemini call has no timeout
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 8, 2026-11-02; not deployed)
+- **Resolution (iteration 8):** `app/drafts.py` `write_outreach` wraps `generate_content` in
+  `asyncio.wait_for(..., timeout_s)`; `Settings.gemini_timeout_s` (`GEMINI_TIMEOUT_S`, default 45 s) is passed
+  from `app/agent.py`. On timeout the pending call is cancelled and every lead gets template drafts
+  (`llm_used = false`). The fallback now also catches transport errors (e.g. `httpx.ConnectError`), which before
+  escaped the narrow `except` and failed the paid job; `BaseException`s (cancellation) still propagate. Log lines
+  name the model (and the API status code). Tests: `tests/test_drafts.py` (never-returning client → templates
+  within the bound and the call is cancelled; connection error → templates; default and env setting),
+  `tests/test_agent.py` (end-to-end job with a hanging client delivers template drafts and the compliance
+  footer). The end-to-end test fails on the previous code. The bound covers the whole call, including any SDK retries.
 - **Evidence:** `app/drafts.py:150-161` sets no timeout; google-genai defaults to none
   (`google/genai/_api_client.py`, `timeout_in_seconds = None`).
 - **Impact:** A hanging model call keeps a paid job `running` until the result deadline passes.
@@ -431,11 +440,13 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 4 | 2026-11-02 | BL-09 | Fixed in code (`debd1e3`); 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
 | 5 | 2026-11-02 | BL-04 | Fixed in code (`c6b0c21`); 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
 | 6 | 2026-11-02 | BL-05 | Fixed in code (`b39e9f0`); 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
-| 7 | 2026-11-02 | BL-06 | Fixed in code; 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
+| 7 | 2026-11-02 | BL-06 | Fixed in code (`4d02fca`); 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
+| 8 | 2026-11-02 | BL-10 | Fixed in code; 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 
 ## Recommended next iteration (Step C)
 
-BL-10: the Gemini call in `app/drafts.py` has no timeout, so a hanging model call keeps a paid job `running`
-until the result deadline. Small, mock-testable (never-returning fake client → template drafts). After that:
-BL-07 (role synonyms), BL-13 (spend-cap reservation). BL-32 is a short follow-up once the V2 state semantics
-are confirmed.
+BL-13: the daily spend cap is read before a job and recorded only at its end, so concurrent jobs can overrun
+it, and a missing treg cost header counts as $0. It protects real treg balance, and it is mock-testable
+(two concurrent jobs, cap = one job budget; missing header). After that: BL-07 (role synonyms), BL-11
+(fallback counter in `/metrics`; the live model check needs the server). BL-32 is a short follow-up once the
+V2 state semantics are confirmed.

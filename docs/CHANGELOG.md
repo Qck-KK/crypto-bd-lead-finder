@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Iteration 8 — BL-10: the Gemini drafting call is bounded (2026-11-02)
+- The one drafting call per job now times out after `GEMINI_TIMEOUT_S` (default 45 s); google-genai sets no
+  timeout of its own, so a hanging call used to keep a paid job `running` until its result deadline. On
+  timeout the pending call is cancelled and every lead gets the template drafts; the job completes normally.
+- Transport errors (connection refused/reset from httpx or aiohttp) also fall back to templates instead of
+  failing the job; before, only API errors and malformed responses did.
+- The fallback log line names the model and, for API errors, the status code.
+
 ### Iteration 7 — BL-06: name matching rejects look-alike companies (2026-11-02)
 - A lead found by company name now needs the same core company name as requested, after removing legal and
   generic words (Inc, Labs, Foundation, Global, .io, …). Before, any company whose name *contained* the
