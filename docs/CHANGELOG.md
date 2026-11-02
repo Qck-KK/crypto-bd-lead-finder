@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Iteration 7 — BL-06: name matching rejects look-alike companies (2026-11-02)
+- A lead found by company name now needs the same core company name as requested, after removing legal and
+  generic words (Inc, Labs, Foundation, Global, .io, …). Before, any company whose name *contained* the
+  requested words matched, so "Link" accepted "Link Metal" and "Uniswap" accepted "Uniswap Ventures".
+- Spacing variants still match ("Chain Link" = "Chainlink"), keeping word order ("Link Chain" no longer does).
+- A link on the requested company's own domain still counts as a match, unchanged.
+- The resolver and the enrichment check use the same comparison (`same_company`), which now also ignores
+  "Global", "International", "HQ" and domain endings.
+
 ### Iteration 6 — BL-05: a failed domain probe is not cached (2026-11-02)
 - When the domain probe raises (treg error, timeout), the unconfirmed resolution is used for that job only and
   not cached; the next job for the company probes again. Before, it was cached for 24 h, so one provider

@@ -250,7 +250,17 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Test: probe raises → next call probes again.
 
 ### BL-06 Name matching accepts look-alike companies
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 7, 2026-11-02; not deployed)
+- **Resolution (iteration 7):** `app/compliance.py` `company_matches` keeps the domain-link path and otherwise
+  delegates to `same_company`, which compares core name tokens in order (`_core_name_tokens`: legal/generic
+  suffixes removed, plus match-only words `global`, `international`, `hq`, `io`, `com`, `xyz`, `org`): equal
+  token sets, or equal with spaces removed ("Chain Link" = "Chainlink"; the old sorted squash also made
+  "Link Chain" equal). Subset matching is gone. The resolver and the enrichment same-company check use the same
+  function, so all three agree. Tests in `tests/test_compliance.py`: 7 legitimate variants accepted, 6
+  look-alikes rejected ("Link Metal", "Chainlink Plumbing", "Uniswap Ventures", "Link Chain", …), and
+  `filter_people` dropping a look-alike while keeping one with a link on the requested domain; 6 of these fail
+  on the previous code. Trade-off: a provider spelling with an extra distinctive word ("Kraken Digital Asset
+  Exchange" for "Kraken") is now dropped in name-search mode; domain-mode leads are unaffected.
 - **Evidence:** `app/compliance.py:216-218`: wanted tokens ⊆ lead tokens, so "Link" matches "Link Metal" and
   "Chainlink" matches "Chainlink Plumbing" (the stricter `same_company` is only used by the resolver).
 - **Impact:** Wrong-company leads in name-search mode (no confirmed domain).
@@ -420,11 +430,12 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 3 | 2026-11-02 | BL-08 | Fixed in code (`170f99e`); 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 | 4 | 2026-11-02 | BL-09 | Fixed in code (`debd1e3`); 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
 | 5 | 2026-11-02 | BL-04 | Fixed in code (`c6b0c21`); 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
-| 6 | 2026-11-02 | BL-05 | Fixed in code; 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
+| 6 | 2026-11-02 | BL-05 | Fixed in code (`b39e9f0`); 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
+| 7 | 2026-11-02 | BL-06 | Fixed in code; 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 
 ## Recommended next iteration (Step C)
 
-BL-06: name matching in `app/compliance.py` accepts look-alike companies ("Chainlink" ⊆ "Chainlink Plumbing")
-in name-search mode. Small, mock-testable, and directly affects wrong-company leads (cost per qualified lead).
-After that: BL-10 (Gemini timeout), BL-07 (role synonyms). BL-32 is a short follow-up once the V2 state
-semantics are confirmed.
+BL-10: the Gemini call in `app/drafts.py` has no timeout, so a hanging model call keeps a paid job `running`
+until the result deadline. Small, mock-testable (never-returning fake client → template drafts). After that:
+BL-07 (role synonyms), BL-13 (spend-cap reservation). BL-32 is a short follow-up once the V2 state semantics
+are confirmed.

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from app.compliance import PUBLIC_FIELDS, filter_people, scrub_contact_text, to_public_lead
 from conftest import LEAKY_ROW, PRIVATE_STRINGS
 
@@ -138,6 +140,42 @@ def test_company_matches():
     assert company_matches("Uniswap Labs", "Uniswap")
     assert not company_matches("Coinbase Ventures Partners", "Uniswap")
     assert not company_matches("Link Supply Co", "Chainlink Labs")
+
+
+@pytest.mark.parametrize("lead_company, wanted", [
+    ("Chainlink Labs", "Chainlink"),
+    ("chainlink", "Chainlink Labs"),
+    ("Chain Link", "Chainlink"),
+    ("Coinbase Global, Inc.", "Coinbase"),
+    ("Gate.io", "Gate"),
+    ("Cardano Foundation", "Cardano"),
+    ("The Graph", "The Graph Foundation"),
+])
+def test_company_name_variants_match(lead_company, wanted):
+    from app.compliance import company_matches
+    assert company_matches(lead_company, wanted)
+
+
+@pytest.mark.parametrize("lead_company, wanted", [
+    ("Link Metal", "Link"),
+    ("Chainlink Plumbing", "Chainlink"),
+    ("Chainlink Plumbing Labs", "Chainlink Labs"),
+    ("Uniswap Ventures", "Uniswap"),
+    ("Link Chain", "Chainlink"),
+    ("Coinbase", "Coinbase Ventures"),
+])
+def test_company_look_alikes_rejected(lead_company, wanted):
+    from app.compliance import company_matches
+    assert not company_matches(lead_company, wanted)
+
+
+def test_look_alike_company_dropped_but_domain_link_kept():
+    rows = [{"name": "A B", "title": "BD Lead", "company": "Link Metal"},
+            {"name": "C D", "title": "BD Lead", "company": "Link"},
+            {"name": "E F", "title": "BD Lead", "company": "Link Metal Works",
+             "organization": {"website_url": "https://jobs.link.io/careers"}}]
+    leads = filter_people(rows, provider="", company="Link", company_domain="link.io")
+    assert [lead["name"] for lead in leads] == ["C D", "E F"]
 
 
 def test_rows_without_name_are_dropped():

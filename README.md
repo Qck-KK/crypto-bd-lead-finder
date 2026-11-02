@@ -249,7 +249,9 @@ not in `AgentPricing`, and the registry description is limited to 250 characters
 
 Provider rows come in different shapes (flat, nested `profile`/`link`/`company`, or `currentPositions` lists);
 `app/compliance.py` reads the allowlisted fields from all of them. Keyword-matching providers can return
-people at look-alike companies, so a lead whose company does not match the requested one is dropped.
+people at look-alike companies, so a lead whose company does not match the requested one is dropped. A match
+needs a link on the requested company's own domain or the same core name after removing legal and generic words
+("Chainlink Labs" = "Chainlink" = "Chain Link"); extra words are not accepted ("Link" ≠ "Link Metal").
 
 Search order:
 

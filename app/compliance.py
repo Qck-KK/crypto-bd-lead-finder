@@ -196,29 +196,33 @@ _COMPANY_SUFFIXES = {"inc", "llc", "ltd", "limited", "co", "corp", "corporation"
                      "the", "network", "protocol"}
 
 
-def _company_tokens(name: str) -> set:
+# Words that do not change which company is meant when comparing names ("Coinbase Global" is Coinbase,
+# "Gate.io" is Gate). Only used for matching, not for domain guesses.
+_MATCH_ONLY_SUFFIXES = {"global", "international", "hq", "io", "com", "xyz", "org"}
+
+
+def _core_name_tokens(name: str) -> list[str]:
+    """Name tokens in order, without legal/generic suffixes (all tokens if nothing else is left)."""
     tokens = re.findall(r"[a-z0-9]+", name.lower())
-    core = {t for t in tokens if t not in _COMPANY_SUFFIXES}
-    return core or set(tokens)
+    core = [t for t in tokens if t not in _COMPANY_SUFFIXES and t not in _MATCH_ONLY_SUFFIXES]
+    return core or tokens
 
 
 def same_company(a: str, b: str) -> bool:
-    """Strict: same core name tokens ("Chainlink Labs" == "chainlink", but not "Chainlink Plumbing")."""
-    squash = lambda s: re.sub(r"[^a-z0-9]", "", "".join(sorted(_company_tokens(s))))  # noqa: E731
-    return bool(_company_tokens(a)) and (_company_tokens(a) == _company_tokens(b) or squash(a) == squash(b))
+    """Strict: same core name tokens ("Chainlink Labs" == "chainlink" == "Chain Link", but not
+    "Chainlink Plumbing" or "Link Metal")."""
+    ta, tb = _core_name_tokens(a), _core_name_tokens(b)
+    # "chainlink" vs "chain link": compare with spaces removed, word order kept.
+    return bool(ta) and (set(ta) == set(tb) or "".join(ta) == "".join(tb))
 
 
 def company_matches(lead_company: str, wanted: str, wanted_domain: str = "", lead_url: str = "") -> bool:
-    """True if the lead's company is the requested one (all core name tokens present, or same domain)."""
+    """True if the lead's company is the requested one: a link on the requested domain, or the same core
+    name (same_company). Extra name words are not accepted: "Link" must not match "Link Metal"."""
     # The bare https://<wanted_domain> is our own fallback, not evidence from the provider.
     if wanted_domain and lead_url and lead_url != f"https://{wanted_domain}" and is_company_site(lead_url, wanted_domain):
         return True
-    want, have = _company_tokens(wanted), _company_tokens(lead_company)
-    if want and want <= have:
-        return True
-    # "chainlink" vs "chain link": compare with spaces removed.
-    squash = lambda s: re.sub(r"[^a-z0-9]", "", " ".join(sorted(_company_tokens(s))))  # noqa: E731
-    return bool(want) and squash(wanted) == squash(lead_company)
+    return same_company(wanted, lead_company)
 
 
 # Ordered from closest to loosest; leads are ranked by the first phrase their title contains.
