@@ -28,8 +28,10 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
   without an input hash); the non-existent `PaidFunds` fallback is gone. Residual: the deployed service is
   0.29 and the shallow 0.30.0 clone has no history to confirm 0.29 has the same check.
 - **Duplicate execution** — SDK fires the callback once per payment instance; re-runs return the stored result
-  (`app/agent.py:165-172`); treg calls carry idempotency keys. A crash during result submission may lead to
-  a second submit attempt (BL-09, Medium).
+  (`app/agent.py:165-172`); treg calls carry idempotency keys. A crash during result submission no longer
+  leads to a second submit attempt: recovery treats `NextAction.requestedAction` `SubmitResultRequested` /
+  `SubmitResultInitiated` as submitted and completes the job from the stored result (BL-09, fixed in code).
+  The Payment Service itself also refuses a second submit unless the next action is `WaitingForExternalAction`.
 - **Cache key** — purchaser identifier + input, not the payment (BL-14, Low): two purchases that reuse both
   share a result.
 
@@ -74,7 +76,7 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
 
 ## Next security steps (in order)
 1. ~~BL-08~~ fixed in code; confirm the amount check in the deployed 0.29 Payment Service source.
-2. BL-09: treat submit-in-progress as submitted during recovery.
+2. ~~BL-09~~ fixed in code: recovery treats a submit-in-progress as submitted.
 3. BL-13: reserve budget at job start; missing cost header = max cost.
 4. BL-15 / BL-16 / BL-17: rate limit `/start_job`, generic error messages, hide docs.
 5. Run `pip-audit` and record the result here.

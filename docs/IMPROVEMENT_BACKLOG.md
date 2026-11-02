@@ -42,7 +42,7 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 3. **Do payment, idempotency, recovery and backups survive real faults?** Partly. The designs are sound
    and unit/integration tested (mocks + PostgreSQL), but: the amount check compares our own requested
    funds, not what was paid (BL-08; fixed in code in iteration 3: the Payment Service matches the locked
-   amount before `FundsLocked`, and identity fields are now required); recovery does not look at an in-flight result submission (BL-09);
+   amount before `FundsLocked`, and identity fields are now required); recovery did not look at an in-flight result submission (BL-09; fixed in code in iteration 4);
    no fault has been injected on the live stack; a restore drill passed once (2026-11-02) and off-host
    copies are manual (BL-25).
 
@@ -177,7 +177,18 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   `blockchainIdentifier`/`inputHash` (rejected) and with a lower locked amount (rejected, if the field exists).
 
 ### BL-09 Recovery may resubmit a result that is already being submitted
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open (unverified)
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 4, 2026-11-02; not deployed)
+- **Resolution (iteration 4):** Verified against the Payment Service source (local 0.30.0 checkout): the action
+  names are `SubmitResultRequested` / `SubmitResultInitiated` (`prisma/schema.prisma`, enum `PaymentAction`),
+  and `src/routes/api/payments/submit-result/index.ts` accepts a submit only while the next action is
+  `WaitingForExternalAction`. So the old behaviour was not a duplicate on-chain submission but a needless
+  re-run followed by a refused submit (404), which left the job `failed` while its result was being put
+  on-chain. `app/job_store.py` `_payment_state` now reads `NextAction.requestedAction` too; `recover_jobs`
+  treats a submit-in-progress like `ResultSubmitted` (completed from the stored result, no re-run, no
+  submit, no monitoring), also when the on-chain state is `RefundRequested`. Tests in
+  `tests/test_reliability.py`: FundsLocked/RefundRequested × Requested/Initiated → completed with no submit;
+  FundsLocked with `WaitingForExternalAction`, no `NextAction` or a malformed one → resumed;
+  RefundRequested with no submission → failed. The 4 in-flight cases fail on the previous code.
 - **Description:** After a crash between "submit result requested" and the on-chain `ResultSubmitted`, recovery
   sees `FundsLocked`, reruns (cached result) and calls submit again.
 - **Evidence:** `app/job_store.py:156-172` checks only `onChainState`, not `NextAction.requestedAction`.
@@ -188,6 +199,19 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   the stored result and keep monitoring.
 - **Acceptance criteria:** Recovery test with `FundsLocked` + submit-requested next action does not call
   `complete_payment` again.
+
+### BL-32 Recovery does not classify the V2 states `WithdrawAuthorized` / `RefundAuthorized`
+- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Open (found in iteration 4)
+- **Evidence:** Payment Service `prisma/schema.prisma` enum `OnChainState` and the V2 datum decoder
+  (`src/utils/converter/string-datum-convert/index.ts`, states 4 and 5) include `WithdrawAuthorized` and
+  `RefundAuthorized`; `app/job_store.py` `_RESULT_ON_CHAIN` / `_REFUNDED` know neither, so a running job in
+  one of them is resumed (monitoring re-attached; the SDK only runs on `FundsLocked`, so it would sit `running`
+  until the result deadline instead of being closed).
+- **Root cause:** State sets written for the V1 contract.
+- **Impact:** A job stays `running` for hours after a restart instead of completed/failed; no extra charge.
+- **Proposed solution:** Confirm from the contract what each state implies about a submitted result, then add
+  them to the matching set.
+- **Acceptance criteria:** Recovery test per state with the expected final job status.
 
 ### BL-04 Unconfirmed domains are scored as "company confirmed by domain"
 - **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
@@ -375,11 +399,11 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 |---|---|---|---|
 | 1 | 2026-11-02 | BL-01 | Fixed in code (`f255fc7`); 112 tests pass (incl. PostgreSQL). Not deployed. |
 | 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code (`03cdbdd`); 120 tests pass (incl. PostgreSQL). Not deployed. |
-| 3 | 2026-11-02 | BL-08 | Fixed in code; 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
+| 3 | 2026-11-02 | BL-08 | Fixed in code (`170f99e`); 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
+| 4 | 2026-11-02 | BL-09 | Fixed in code; 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
 
 ## Recommended next iteration (Step C)
 
-BL-09 (recovery during result submission): treat a `FundsLocked` record whose `NextAction.requestedAction`
-is a submit-in-progress state as already submitted, so recovery marks the job completed from the stored
-result instead of calling `complete_payment` again. The `NextAction` shape is in the same resolve endpoint
-read for BL-08. Then BL-04 / BL-05 (domain evidence and probe-error caching, both in the resolver path).
+BL-04 + BL-05 (resolver path): pass `"domain"` evidence only for a confirmed domain, and do not cache a
+domain probe that raised. Both touch `app/resolver.py` / `app/router.py` / `app/scoring.py` and are small
+and fully testable with mocks. BL-32 is a one-line follow-up once the V2 state semantics are confirmed.

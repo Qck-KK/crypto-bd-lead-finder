@@ -264,12 +264,45 @@ async def test_recovery_completes_jobs_whose_result_is_already_on_chain(env, pay
     assert payment_mock["submitted"] is None and "pay-j1" not in payment_mock["callbacks"]  # not resubmitted
 
 
+@pytest.mark.parametrize("on_chain", ["FundsLocked", "RefundRequested"])
+@pytest.mark.parametrize("action", ["SubmitResultRequested", "SubmitResultInitiated"])
+async def test_recovery_does_not_resubmit_a_result_in_flight(env, payment_mock, _fresh_ledger, on_chain, action):
+    # Crash after "submit result" was handed to the Payment Service but before it confirmed on-chain (BL-09).
+    storage = InMemoryJobStorage()
+    await storage.create_job("j1", _running_job("j1"))
+    await _fresh_ledger.put_result(_job_tag("abcdef1234567890", INPUT), "standard", "THE RESULT")
+    payment_mock["record"] = {"onChainState": on_chain, "NextAction": {"requestedAction": action}}
+    counts = await recover_jobs(_server(storage))
+    job = await storage.get_job("j1")
+    assert counts == {"resumed": 0, "expired": 0, "completed": 1, "refunded": 0}
+    assert job["status"] == "completed" and job["result"] == "THE RESULT"
+    assert payment_mock["submitted"] is None and "pay-j1" not in payment_mock["callbacks"]
+
+
+@pytest.mark.parametrize("next_action", [{"requestedAction": "WaitingForExternalAction"}, None, "garbage"])
+async def test_recovery_reruns_locked_job_without_submission(env, payment_mock, _fresh_ledger, next_action):
+    # FundsLocked and nothing submitted yet: monitoring is re-attached so the job runs (and submits) once.
+    storage = InMemoryJobStorage()
+    await storage.create_job("j1", _running_job("j1"))
+    payment_mock["record"] = {"onChainState": "FundsLocked", "NextAction": next_action}
+    counts = await recover_jobs(_server(storage))
+    assert counts["resumed"] == 1 and "pay-j1" in payment_mock["callbacks"]
+    assert (await storage.get_job("j1"))["status"] == "running"
+
+
 async def test_recovery_fails_refunded_and_unrecoverable_jobs(env, payment_mock, _fresh_ledger):
     storage = InMemoryJobStorage()
     await storage.create_job("j2", _running_job("j2"))
     payment_mock["record"] = {"onChainState": "RefundWithdrawn"}
     counts = await recover_jobs(_server(storage))
     assert counts["refunded"] == 1 and (await storage.get_job("j2"))["status"] == "failed"
+
+    storage = InMemoryJobStorage()
+    await storage.create_job("j4", _running_job("j4"))
+    payment_mock["record"] = {"onChainState": "RefundRequested",
+                              "NextAction": {"requestedAction": "WaitingForExternalAction"}}
+    counts = await recover_jobs(_server(storage))
+    assert counts["refunded"] == 1 and (await storage.get_job("j4"))["status"] == "failed"
 
     storage = InMemoryJobStorage()
     await storage.create_job("j3", _running_job("j3", {"company": "Other"}))

@@ -107,24 +107,35 @@ def _epoch_s(value: Any) -> Optional[float]:
 # On-chain states after which the job must not run again.
 _RESULT_ON_CHAIN = {"ResultSubmitted", "Withdrawn", "Disputed", "DisputedWithdrawn"}
 _REFUNDED = {"RefundRequested", "RefundWithdrawn", "FundsOrDatumInvalid"}
+# Payment Service next actions meaning "our result hash was handed over and is being put on-chain".
+# The on-chain state is still FundsLocked (or RefundRequested) until the transaction confirms, and the
+# submit-result endpoint only accepts a payment whose next action is WaitingForExternalAction, so a
+# second submit would be refused (404) and the job marked failed although its result is on its way.
+# Source: masumi-payment-service `prisma/schema.prisma` (enum PaymentAction),
+# `src/routes/api/payments/submit-result/index.ts`, `src/utils/logic/state-transitions/transition-tables.ts`.
+_SUBMIT_IN_PROGRESS = {"SubmitResultRequested", "SubmitResultInitiated"}
 
 
-async def _on_chain_state(payment: V2Payment, payment_id: str) -> Optional[str]:
+async def _payment_state(payment: V2Payment, payment_id: str) -> tuple[Optional[str], Optional[str]]:
+    """(onChainState, NextAction.requestedAction) of the payment, or (None, None) if unreadable."""
     try:
         data = (await payment.check_payment_status_by_identifier(payment_id)).get("data") or {}
-        return data.get("onChainState")
+        next_action = data.get("NextAction")
+        action = next_action.get("requestedAction") if isinstance(next_action, dict) else None
+        return data.get("onChainState"), action
     except Exception as e:
         logger.warning("Could not read the on-chain state of %s...: %s", payment_id[:12], type(e).__name__)
-        return None
+        return None, None
 
 
 async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -> dict:
     """Bring unfinished jobs back after a restart.
 
     - awaiting_payment: monitoring is re-attached; the job runs when the escrow is locked.
-    - running, result already on-chain (crash between submission and bookkeeping): marked completed
-      with the stored result, never run twice.
-    - running, refunded: marked failed.
+    - running, result already on-chain, or its submission already requested from the Payment Service
+      (crash between "submit result" and bookkeeping): marked completed with the stored result, never
+      run or submitted twice.
+    - running, refunded (and no result submission in progress): marked failed.
     - running, escrow still locked: runs again; the stored result (or treg's idempotency keys) keeps
       the on-chain hash identical and avoids paying providers twice.
     """
@@ -154,8 +165,14 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
             payment.payment_ids.add(payment_id)
 
             if status == JobStatus.RUNNING.value:
-                state = await _on_chain_state(payment, payment_id)
-                if state in _RESULT_ON_CHAIN:
+                state, action = await _payment_state(payment, payment_id)
+                if state in _REFUNDED and action not in _SUBMIT_IN_PROGRESS:
+                    await manager.set_job_failed(job_id, f"Payment refunded while the agent was offline ({state})")
+                    counts["refunded"] += 1
+                    continue
+                if state in _RESULT_ON_CHAIN or action in _SUBMIT_IN_PROGRESS:
+                    # Result on-chain, or its submission already handed to the Payment Service: never
+                    # run or submit again; the Payment Service finishes (or retries) the submission.
                     tag = _job_tag(job["identifier_from_purchaser"], job.get("input_data") or {})
                     stored = await get_ledger().get_result(tag)
                     if stored is not None:
@@ -165,10 +182,6 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
                         await manager.set_job_failed(job_id, "Result was submitted before the restart but is "
                                                              "not stored locally")
                     counts["completed"] += 1
-                    continue
-                if state in _REFUNDED:
-                    await manager.set_job_failed(job_id, f"Payment refunded while the agent was offline ({state})")
-                    counts["refunded"] += 1
                     continue
 
             manager._payment_instances[job_id] = payment

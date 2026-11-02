@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Iteration 4 — BL-09: recovery never resubmits a result in flight (2026-11-02)
+- After a restart, a running job whose payment's `NextAction.requestedAction` is `SubmitResultRequested` or
+  `SubmitResultInitiated` is treated as submitted (as `ResultSubmitted` already was): it is marked completed
+  from the stored result, not re-run and not submitted again. Before, it re-ran and called submit-result,
+  which the Payment Service refuses in that state, so the job ended `failed` although its result was being
+  put on-chain.
+- A `RefundRequested` payment with a submission in progress counts as submitted, not refunded.
+- Source references for the action names and the submit-result guard in `app/job_store.py`.
+
 ### Iteration 3 — BL-08: payment check binds the escrow guarantee to the job (2026-11-02)
 - Documented what `FundsLocked` guarantees: the Payment Service compares the on-chain locked amount with the
   request's `RequestedFunds` before setting it (source references in `app/server.py` `check_payment`).

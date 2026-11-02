@@ -29,7 +29,7 @@ Pro preflight FAILs "Pro enrichment enabled" while `ENRICH_BUDGET_USD` is 0, on 
 | Pro delivers what it advertises, or is not sold | Fixed in code, not deployed; enrichment budget is the owner's decision | BL-01 |
 | Quality labels honest (masked / no LinkedIn never High) | Fixed in code, not deployed | BL-02, BL-03 |
 | Payment amount guarantee documented and enforced | Fixed in code, not deployed (verified against Payment Service 0.30.0 source; 0.29 to confirm) | BL-08 |
-| Recovery never resubmits | Open | BL-09 |
+| Recovery never resubmits | Fixed in code, not deployed; no fault injected on the live stack yet | BL-09 |
 | Spend cap holds under concurrency | Open | BL-13 |
 | Gemini timeout | Open | BL-10 |
 | At least 3 real users tested the output | Open | BL-22 |
