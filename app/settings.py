@@ -58,6 +58,14 @@ class Settings:
     daily_spend_cap_usd: float = 1.0
     # Upper bound for the Gemini drafting call; on timeout the job delivers template drafts.
     gemini_timeout_s: float = 45.0
+    # Hard limit for one run of a job. Its spend hold counts until the end of the UTC day containing
+    # start + this limit (+ grace), so a run cannot spend after its hold stops counting.
+    attempt_timeout_s: float = 1800.0
+    # Count treg refusals its docs call free (402 route_max_cost, 409, 422, ...) as $0 instead of their max
+    # cost. Off until treg confirms the semantics.
+    trust_uncharged_refusals: bool = False
+    # Operator switch: refuse new jobs (/start_job 503, /availability unavailable), e.g. before a rollback.
+    pause_new_jobs: bool = False
 
     @property
     def is_pro(self) -> bool:
@@ -77,6 +85,8 @@ class Settings:
 
     def sale_blocked_reason(self) -> Optional[str]:
         """Why this agent must not take new jobs, or None."""
+        if self.pause_new_jobs:
+            return "paused by the operator (PAUSE_NEW_JOBS)"
         if self.is_pro and not self.enrichment_enabled and not self.pro_allow_without_enrichment:
             return "Pro enrichment is off (ENRICH_BUDGET_USD), so Pro would deliver the standard results"
         return None
@@ -102,4 +112,7 @@ class Settings:
             public_url=os.getenv("AGENT_PUBLIC_URL", "").rstrip("/"),
             daily_spend_cap_usd=_float("DAILY_SPEND_CAP_USD", 1.0),
             gemini_timeout_s=_float("GEMINI_TIMEOUT_S", 45.0),
+            attempt_timeout_s=max(60.0, _float("ATTEMPT_TIMEOUT_S", 1800.0)),
+            trust_uncharged_refusals=_bool("TREG_TRUST_UNCHARGED_REFUSALS"),
+            pause_new_jobs=_bool("PAUSE_NEW_JOBS"),
         )

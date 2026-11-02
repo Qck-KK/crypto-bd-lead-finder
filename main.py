@@ -27,6 +27,8 @@ from app.report import FOOTER  # noqa: E402
 from app.server import Health, ReliableAgentServer, add_admin_routes, add_sale_guard  # noqa: E402
 from app.settings import Settings  # noqa: E402
 
+EXPIRE_INTERVAL_S = 600
+
 masumi_compat.install()
 
 setup_logging()
@@ -96,14 +98,25 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
         # Wrap the SDK's lifespan: connect and recover jobs before serving, close the pools after.
         inner = app.router.lifespan_context
 
+        async def expire_loop():
+            # Unsettled attempts past their counts_until become crashed cost rows (idempotent, both agents).
+            while True:
+                try:
+                    await job_ledger.expire_attempts()
+                except Exception as e:
+                    logging.getLogger(__name__).warning("Attempt expiry failed: %s", type(e).__name__)
+                await asyncio.sleep(EXPIRE_INTERVAL_S)
+
         @asynccontextmanager
         async def lifespan(a):
             await job_storage.connect()
             await recover_jobs(server)
+            expiry = asyncio.create_task(expire_loop())
             try:
                 async with inner(a):
                     yield
             finally:
+                expiry.cancel()
                 await job_storage.close()
                 for closable in (feedback_store, job_ledger):
                     if hasattr(closable, "close"):

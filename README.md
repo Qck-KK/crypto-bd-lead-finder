@@ -32,10 +32,10 @@ The report ends with the data source and the B2B-only notice. It never contains 
 | Area | What happens |
 |---|---|
 | Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. The compose `backup` service runs `deploy/backup.sh` on start and every 24 h: both databases, 7 dumps each, in `BACKUP_HOST_DIR` (default `/data/workspace/backups`). Copy them off the server; the Payment Service dump holds wallet keys encrypted with `ENCRYPTION_KEY`, so never store it next to the key. |
-| Idempotency | The result is stored under the job tag (purchaser identifier + input) before the SDK submits it on-chain. A re-run returns it unchanged: same on-chain hash, no provider paid twice. treg calls also carry idempotency keys. |
+| Idempotency | The result is stored under the job tag (agent, tier, the order's payment id, purchaser identifier, input) before the SDK submits it on-chain. A re-run of the same order returns it unchanged: same on-chain hash, no provider paid twice. Two orders never share a result, also not a Standard and a Pro order with the same identifier and input. treg calls carry idempotency keys derived from the job tag and the request body. |
 | Recovery | On start: jobs awaiting payment get monitoring back; running jobs whose result is already on-chain, or whose submission the Payment Service is already processing (`NextAction` `SubmitResultRequested`/`Initiated`), are marked completed from the stored result (never resubmitted); refunded ones fail; locked ones run again. |
 | Payment acceptance | Work starts only on `FundsLocked`, which the Payment Service sets only after matching the on-chain escrow against the requested amount and token (else `FundsOrDatumInvalid`). Before any work the record is checked against this job: same payment id, this agent, this input hash (all must be present), expected token, at least the registered price. Otherwise the job fails and nothing is delivered. If the status cannot be read (3 tries), the job fails closed. |
-| Spend control | `DAILY_SPEND_CAP_USD` (default 1.0) caps treg spend per UTC day across all agents on the database (one treg balance). Each job reserves its worst case (domain probes and Apollo search at $0.01 each, `TREG_JOB_BUDGET_USD`, Pro `ENRICH_BUDGET_USD`) before its first call; concurrent jobs and both agents share the cap through that reservation. Every treg call, including the free Apollo ones, must fit in the job's grant, and its cost is deducted; a missing or invalid cost header counts as the call's max cost. A crashed job's reservation counts until the end of the UTC day and is reused by its retry. If the ledger cannot be read, or the cap is used up, no treg call is made and the job fails (refundable). |
+| Spend control | `DAILY_SPEND_CAP_USD` (default 1.0) caps treg spend per UTC day across all agents on the database (one treg balance). Each job reserves its worst case (domain probes and Apollo search at $0.01 each, `TREG_JOB_BUDGET_USD`, Pro `ENRICH_BUDGET_USD`) before its first call; concurrent jobs and both agents share the cap through that reservation. Every run of a job (attempt) has its own reservation; every treg call, including the free Apollo ones, must fit in it, is written to the ledger before it is sent, and its cost is deducted. A missing or invalid cost header counts as the call's max cost (floored to the 4 decimals sent). An unsettled reservation (crash, retry, a run across UTC midnight) keeps counting until the end of the UTC day containing its start + `ATTEMPT_TIMEOUT_S`; a retry never releases it. If the ledger cannot be read, or the cap is used up, no treg call is made and the job fails (refundable). The cap holds on our accounting; that it is a hard bound also depends on treg never charging more than the max cost sent, which is not yet confirmed for the direct Apollo endpoints. |
 | Monitoring | `/availability` reports `unavailable` when the Payment Service or database is down (the registry then hides the agent). `/admin/stats` (JSON, ledger per agent) and `/metrics` (Prometheus text) need `x-admin-token`. Logs carry the job tag, `LOG_FORMAT=json` is available, and SDK lines with results or inputs are redacted. |
 | Launch checks | `scripts/preflight.py` (read-only, `--target Mainnet` for a readiness review), `scripts/acceptance.py` (paid end-to-end test, Preprod only), `MAINNET_CHECKLIST.md`. |
 
@@ -124,8 +124,8 @@ Service; when funds are locked in escrow it runs the job and submits the result 
 In practice most jobs are answered by Apollo's free search ($0 on treg), so the estimate above is the
 worst case of the routed fallback. treg bills that fallback per returned row and routes across providers;
 misses at some providers are billed too.
-`TREG_MAX_COST_USD` (default $0.15) is sent as `X-Treg-Route-Max-Cost`, so one job never spends more than
-that on treg. Change the inputs with `COST_TREG_PER_ROW_USD`, `COST_LLM_PER_JOB_USD`, `PRICE_MARKUP`, or set
+`TREG_MAX_COST_USD` (default $0.15) is sent as `X-Treg-Route-Max-Cost` on the routed search; treg refuses a
+call whose reservation would exceed it (treg docs). Change the inputs with `COST_TREG_PER_ROW_USD`, `COST_LLM_PER_JOB_USD`, `PRICE_MARKUP`, or set
 `PRICE_TUSDM` directly. The price is fixed on-chain at registration;
 `python scripts/registration_values.py` prints it in the atomic units the registration form needs.
 
@@ -176,6 +176,7 @@ The masumi SDK keeps jobs in memory by default. With `AGENT_DATABASE_URL` set, j
 PostgreSQL (`app/job_store.py`). On startup the agent re-attaches payment monitoring for jobs still
 awaiting payment or running; a job whose escrow is locked runs again (treg's idempotency key prevents
 paying twice for the same search), and jobs whose deadline passed while offline are marked failed.
+Rolling back to a version without per-attempt spend holds: `docs/ROLLBACK.md`.
 
 ## Deploy on a server (Docker Compose)
 

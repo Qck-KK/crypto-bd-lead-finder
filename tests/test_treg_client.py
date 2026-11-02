@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from app.treg_client import TregError, search_people
+from app.treg_client import TregError, idempotency_key, search_people
 
 URL = "https://treg.test/call/treg.people.search"
 
@@ -29,7 +29,8 @@ async def test_request_shape_and_parsing():
     assert req.headers["X-Treg-Token"] == "tok"
     assert req.headers["X-Treg-Route-Max-Cost"] == "0.1500"
     assert req.headers["X-Treg-Meta"] == "job=abc123"
-    assert req.headers["Idempotency-Key"] == "bdlf-abc123"
+    # The key hashes job, endpoint and body: same request = same key (BL-37).
+    assert req.headers["Idempotency-Key"] == idempotency_key("abc123", "treg.people.search", json.loads(req.content))
     assert json.loads(req.content) == {"limit": 10, "company_domain": "examplelabs.io"}
     assert result.people == [{"name": "A"}]
     assert result.served_by == "apollo"

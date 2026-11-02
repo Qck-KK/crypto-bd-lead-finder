@@ -3,9 +3,22 @@ free `apollo.people.search`.
 
 treg relays provider-native rows, so field names differ by provider. This module only fetches;
 `compliance.py` decides what may leave the agent.
+
+Cost of a call (what the caller charges to the job's budget):
+- `X-Treg-Cost-Micro` when valid; on an error response also `charged_micro` in the body (treg bills
+  some failed routes, e.g. 502 route_failed), the larger of the two;
+- otherwise the max cost sent (`cost_assumed`): missing or invalid header, transport errors;
+- a treg refusal that its docs call free (402 route_max_cost, 409, 422, ...) counts $0 only when
+  TREG_TRUST_UNCHARGED_REFUSALS is on; that semantics is not yet confirmed by treg.
+The max cost is floored to the header's 4 decimals, so what we send and what we assume are equal.
+The idempotency key hashes the request: a retry of the same request replays at no cost, a changed
+request gets a new key instead of treg's 422 for a reused one.
 """
 
+import hashlib
+import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -21,6 +34,9 @@ APOLLO_MAX_COST_USD = 0.01
 
 _META_SAFE = re.compile(r"[^A-Za-z0-9._:-]")
 _COST_MICRO = re.compile(r"[0-9]{1,12}")
+# treg's own refusals (X-Treg-Error: 1) its docs describe as not charged; None = any error code.
+UNCHARGED_REFUSALS: dict[int, Optional[frozenset]] = {
+    402: frozenset({"route_max_cost", "insufficient_balance"}), 429: frozenset({"share_busy"}), 409: None, 422: None}
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +62,16 @@ class TregSearchResult:
     extra: dict[str, Any] = field(default_factory=dict)
 
 
+def floor_cost(usd: float) -> float:
+    """The max cost as sent in X-Treg-Route-Max-Cost: floored to 4 decimals (never rounded up)."""
+    return math.floor(round(max(usd, 0.0) * 10_000, 6)) / 10_000
+
+
+def idempotency_key(job_tag: str, endpoint_id: str, body: dict) -> str:
+    canonical = json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return "bdlf-" + hashlib.sha256(f"{job_tag}|{endpoint_id}|{canonical}".encode()).hexdigest()[:40]
+
+
 def build_query(company: str, role: Optional[str]) -> str:
     return f"{role} at {company}" if role else f"people at {company}"
 
@@ -67,6 +93,7 @@ async def search_people(
     base_url: str = "https://treg.to",
     timeout_s: float = 60.0,
     client: Optional[httpx.AsyncClient] = None,
+    trust_refusals: bool = False,
 ) -> TregSearchResult:
     if not token:
         raise TregError("TREG_TOKEN is not set")
@@ -80,7 +107,7 @@ async def search_people(
     else:
         body["q"] = build_query(company, role)
     return await _call(ENDPOINT_ID, body, token=token, max_cost_usd=max_cost_usd, job_tag=job_tag,
-                       base_url=base_url, timeout_s=timeout_s, client=client)
+                       base_url=base_url, timeout_s=timeout_s, client=client, trust_refusals=trust_refusals)
 
 
 async def search_apollo(
@@ -93,6 +120,7 @@ async def search_apollo(
     base_url: str = "https://treg.to",
     timeout_s: float = 60.0,
     client: Optional[httpx.AsyncClient] = None,
+    trust_refusals: bool = False,
 ) -> TregSearchResult:
     """Apollo people search by company domain and titles. Free on treg; returns no contact data
     (last names come obfuscated, e.g. "S***h", and there are no profile links)."""
@@ -102,7 +130,7 @@ async def search_apollo(
     if titles:
         body["person_titles"] = titles
     result = await _call(APOLLO_ENDPOINT_ID, body, token=token, max_cost_usd=APOLLO_MAX_COST_USD, job_tag=job_tag,
-                         base_url=base_url, timeout_s=timeout_s, client=client)
+                         base_url=base_url, timeout_s=timeout_s, client=client, trust_refusals=trust_refusals)
     result.served_by = result.served_by or "apollo"
     return result
 
@@ -116,6 +144,7 @@ async def enrich_apollo(
     base_url: str = "https://treg.to",
     timeout_s: float = 60.0,
     client: Optional[httpx.AsyncClient] = None,
+    trust_refusals: bool = False,
 ) -> TregSearchResult:
     """Apollo bulk enrichment by Apollo person id (max 10). ~$0.026 per match on treg.
 
@@ -127,7 +156,7 @@ async def enrich_apollo(
     body = {"details": [{"id": i} for i in apollo_ids[:10]]}
     return await _call(f"{APOLLO_ENRICH_ENDPOINT_ID}?reveal_personal_emails=false&reveal_phone_number=false", body,
                        token=token, max_cost_usd=max_cost_usd, job_tag=job_tag, base_url=base_url,
-                       timeout_s=timeout_s, client=client)
+                       timeout_s=timeout_s, client=client, trust_refusals=trust_refusals)
 
 
 async def _call(
@@ -140,14 +169,17 @@ async def _call(
     base_url: str,
     timeout_s: float,
     client: Optional[httpx.AsyncClient],
+    trust_refusals: bool = False,
 ) -> TregSearchResult:
-    tag = _meta_value(job_tag)
+    max_cost = floor_cost(max_cost_usd)
+    if max_cost <= 0:
+        raise TregError("max cost below 0.0001 USD; call not sent")
     headers = {
         "X-Treg-Token": token,
-        "X-Treg-Route-Max-Cost": f"{max_cost_usd:.4f}",
-        "X-Treg-Meta": f"job={tag}",
-        # A retry of the same job returns the stored answer instead of paying twice.
-        "Idempotency-Key": f"bdlf-{tag}",
+        "X-Treg-Route-Max-Cost": f"{max_cost:.4f}",
+        "X-Treg-Meta": f"job={_meta_value(job_tag)}",
+        # Same request (job, call, body) = same key: a retry replays the stored answer at no cost.
+        "Idempotency-Key": idempotency_key(job_tag, endpoint_id, body),
     }
 
     owns_client = client is None
@@ -156,16 +188,17 @@ async def _call(
         resp = await client.post(f"{base_url}/call/{endpoint_id}", json=body, headers=headers)
     except httpx.HTTPError as e:
         # The request may have reached treg (timeout, reset), so it may have been charged.
-        _warn_assumed(endpoint_id, max_cost_usd, "no response")
-        raise TregError(f"treg request failed: {type(e).__name__}", cost_usd=max_cost_usd, cost_assumed=True) from e
+        _warn_assumed(endpoint_id, max_cost, "no response")
+        raise TregError(f"treg request failed: {type(e).__name__}", cost_usd=max_cost, cost_assumed=True) from e
     finally:
         if owns_client:
             await client.aclose()
 
-    cost_usd, assumed = call_cost(resp, max_cost_usd)
+    failed = resp.headers.get("X-Treg-Error") == "1" or resp.status_code >= 400
+    cost_usd, assumed = call_cost(resp, max_cost, failed=failed, trust_refusals=trust_refusals)
     if assumed:
-        _warn_assumed(endpoint_id, max_cost_usd, f"HTTP {resp.status_code} without a valid cost header")
-    if resp.headers.get("X-Treg-Error") == "1" or resp.status_code >= 400:
+        _warn_assumed(endpoint_id, max_cost, f"HTTP {resp.status_code} without a valid cost")
+    if failed:
         raise TregError(f"treg returned HTTP {resp.status_code}: {_error_summary(resp)}", cost_usd=cost_usd,
                         cost_assumed=assumed)
 
@@ -191,12 +224,55 @@ async def _call(
     )
 
 
-def call_cost(resp: httpx.Response, max_cost_usd: float) -> tuple[float, bool]:
-    """(cost in USD, assumed). Without a valid X-Treg-Cost-Micro (missing, negative, fractional, garbage) the
-    call counts at the max cost we allowed for it, so spend is never undercounted. "0" is a real zero."""
-    raw = (resp.headers.get("X-Treg-Cost-Micro") or "").strip()
-    if _COST_MICRO.fullmatch(raw):
-        return int(raw) / 1_000_000, False
+def _micro(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and _COST_MICRO.fullmatch(value.strip()):
+        return int(value.strip())
+    return None
+
+
+def _body(resp: httpx.Response) -> dict:
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _body_charged_micro(resp: httpx.Response) -> Optional[int]:
+    data = _body(resp)
+    found = _micro(data.get("charged_micro"))
+    detail = data.get("detail")
+    if found is None and isinstance(detail, dict):
+        found = _micro(detail.get("charged_micro"))
+    return found
+
+
+def _is_uncharged_refusal(resp: httpx.Response) -> bool:
+    if resp.headers.get("X-Treg-Error") != "1" or resp.status_code not in UNCHARGED_REFUSALS:
+        return False
+    codes = UNCHARGED_REFUSALS[resp.status_code]
+    data = _body(resp)
+    detail = data.get("detail") if isinstance(data.get("detail"), dict) else {}
+    code = data.get("error") or detail.get("error")
+    return codes is None or code in codes
+
+
+def call_cost(resp: httpx.Response, max_cost_usd: float, *, failed: bool = False,
+              trust_refusals: bool = False) -> tuple[float, bool]:
+    """(cost in USD, assumed). Never undercounts what treg reports: on a failed call the larger of the
+    header and the body's charged_micro. Without either, the max cost we allowed (assumed), unless the call is
+    a treg refusal documented as free and TREG_TRUST_UNCHARGED_REFUSALS is on. "0" is a real zero."""
+    header = _micro((resp.headers.get("X-Treg-Cost-Micro") or "").strip())
+    body = _body_charged_micro(resp) if failed else None
+    known = [v for v in (header, body) if v is not None]
+    if known:
+        return max(known) / 1_000_000, False
+    if failed and trust_refusals and _is_uncharged_refusal(resp):
+        return 0.0, False
     return max_cost_usd, True
 
 

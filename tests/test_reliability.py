@@ -13,7 +13,8 @@ from masumi import Config, InMemoryJobStorage
 
 from app import drafts as drafts_module
 from app import ledger as ledger_module
-from app.agent import INPUT_SCHEMA, _job_tag, process_job
+from app.agent import INPUT_SCHEMA, process_job
+from app.job_identity import identity_for_job, job_tag
 from app.job_store import recover_jobs
 from app.logs import RedactFilter, job_tag_var
 from app.pricing import TUSDM_UNIT
@@ -25,6 +26,11 @@ APOLLO_URL = "https://treg.test/call/apollo.people.search"
 ROUTED_URL = "https://treg.test/call/treg.people.search"
 INPUT = {"company": "Acme Labs", "role": "BD", "company_domain": "acme.io"}
 FREE = {"X-Treg-Cost-Micro": "0"}  # Apollo's search is free: treg reports a zero cost
+
+
+def _tag(buyer, input_data=INPUT):
+    """Tag of a job run outside the payment flow (no SDK job context)."""
+    return job_tag("standard", "", None, buyer, input_data)
 
 
 def _apollo(request):
@@ -54,7 +60,7 @@ async def test_rerun_returns_stored_result_without_calling_providers(settings, g
     assert second == first
     assert apollo.call_count + routed.call_count == calls  # nothing paid or fetched again
 
-    row = _fresh_ledger.jobs[_job_tag("buyer-1", INPUT)]
+    row = _fresh_ledger.jobs[_tag("buyer-1")]
     assert row["outcome"] == "delivered" and row["leads"] == 1 and row["treg_usd"] == pytest.approx(0.02)
     assert row["price_tusdm"] == 0.27 and row["company"] == "Acme Labs"
     assert await _fresh_ledger.spend_today() == pytest.approx(0.02)
@@ -69,7 +75,7 @@ async def test_failed_job_is_recorded_and_not_cached(settings, gemini, _fresh_le
     respx.post(ROUTED_URL).mock(return_value=httpx.Response(402, json={"error": "x"}, headers={"X-Treg-Error": "1"}))
     with pytest.raises(Exception):
         await process_job("buyer-f", INPUT, settings)
-    tag = _job_tag("buyer-f", INPUT)
+    tag = _tag("buyer-f")
     assert _fresh_ledger.jobs[tag]["outcome"] == "failed"
     assert await _fresh_ledger.get_result(tag) is None
 
@@ -87,8 +93,8 @@ async def test_daily_cap_reached_makes_no_treg_call_at_all(settings, gemini, _fr
     with pytest.raises(TregError, match="daily spend budget used up"):
         await process_job("buyer-cap", INPUT, dataclasses.replace(settings, daily_spend_cap_usd=1.0))
     assert not apollo.called and not routed.called
-    row = _fresh_ledger.jobs[_job_tag("buyer-cap", INPUT)]
-    assert row["outcome"] == "failed" and row["treg_usd"] == 0 and not _fresh_ledger.reservations
+    row = _fresh_ledger.jobs[_tag("buyer-cap")]
+    assert row["outcome"] == "failed" and row["treg_usd"] == 0 and not [a for a in _fresh_ledger.attempts.values() if a["status"] == "open"]
 
 
 @respx.mock
@@ -140,9 +146,11 @@ async def test_ledger_stats_aggregate_by_day_and_tier(_fresh_ledger):
     s = await _fresh_ledger.stats(7)
     pro = next(d for d in s["days"] if d["tier"] == "pro")
     assert (pro["jobs"], pro["delivered"], pro["failed"], pro["revenue_tusdm"]) == (2, 1, 1, 1.05)
-    assert s["totals"] == {"jobs": 4, "cost_usd": 0.31, "revenue_tusdm": 1.59, "cost_assumed_calls": 0}
+    assert s["totals"] == {"jobs": 4, "cost_usd": 0.31, "revenue_tusdm": 1.59, "cost_assumed_calls": 0,
+                           "unconfirmed_usd": 0.0, "crashed_attempts": 0}
     only_pro = await _fresh_ledger.stats(7, tier="pro")
-    assert only_pro["totals"] == {"jobs": 2, "cost_usd": 0.26, "revenue_tusdm": 1.05, "cost_assumed_calls": 0}
+    assert only_pro["totals"] == {"jobs": 2, "cost_usd": 0.26, "revenue_tusdm": 1.05, "cost_assumed_calls": 0,
+                                "unconfirmed_usd": 0.0, "crashed_attempts": 0}
 
 
 # --- payment acceptance ---------------------------------------------------------
@@ -286,7 +294,7 @@ def _running_job(job_id, input_data=INPUT):
 async def test_recovery_completes_jobs_whose_result_is_already_on_chain(env, payment_mock, _fresh_ledger):
     storage = InMemoryJobStorage()
     await storage.create_job("j1", _running_job("j1"))
-    await _fresh_ledger.put_result(_job_tag("abcdef1234567890", INPUT), "standard", "THE RESULT")
+    await _fresh_ledger.put_result(identity_for_job(_running_job("j1"), "standard").tag, "standard", "THE RESULT")
     payment_mock["record"] = {"onChainState": "ResultSubmitted"}
     counts = await recover_jobs(_server(storage))
     job = await storage.get_job("j1")
@@ -300,7 +308,7 @@ async def test_recovery_does_not_resubmit_a_result_in_flight(env, payment_mock, 
     # Crash after "submit result" was handed to the Payment Service but before it confirmed on-chain (BL-09).
     storage = InMemoryJobStorage()
     await storage.create_job("j1", _running_job("j1"))
-    await _fresh_ledger.put_result(_job_tag("abcdef1234567890", INPUT), "standard", "THE RESULT")
+    await _fresh_ledger.put_result(identity_for_job(_running_job("j1"), "standard").tag, "standard", "THE RESULT")
     payment_mock["record"] = {"onChainState": on_chain, "NextAction": {"requestedAction": action}}
     counts = await recover_jobs(_server(storage))
     job = await storage.get_job("j1")

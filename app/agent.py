@@ -1,16 +1,18 @@
 """Job handler: input -> domain resolver -> provider router (via treg) -> compliance filter + scoring
 -> (Pro) enrichment -> verification -> personalized outreach -> report with a feedback link."""
 
+import asyncio
 import dataclasses
-import hashlib
 import logging
 import time
+import uuid
 from typing import Any, Optional
 
 from . import feedback
 from .compliance import normalize_domain
 from .drafts import TONES, OutreachContext, write_outreach
 from .enrich import enrich_leads, needs_enrichment
+from .job_identity import JobIdentity, current_identity, legacy_tag
 from .ledger import get_ledger
 from .logs import job_tag_var
 from .pricing import estimate
@@ -19,11 +21,15 @@ from .resolver import candidate_domains, resolve_company
 from .router import find_leads, person_hash, public_view
 from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
-from .spend import JobBudget, SpendCapReached
-from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo
+from .spend import JobBudget
+from .treg_client import APOLLO_MAX_COST_USD, search_apollo
 from .verify import apply_verification, verify_lead
 
 logger = logging.getLogger(__name__)
+
+# An attempt's hold counts until the end of the UTC day containing created_at + ATTEMPT_TIMEOUT_S + this grace:
+# time for a timed-out attempt to settle after it was cancelled.
+ATTEMPT_GRACE_S = 600
 
 _NO_CONTACTS = "Public professional data only: no personal phone numbers, emails or addresses."
 _AS_PROVIDED = ("Some names may be partly masked by the data provider, and people without a public profile link "
@@ -137,25 +143,17 @@ def _clean(value: Any, max_len: int) -> Optional[str]:
     return value or None
 
 
-def _job_tag(identifier_from_purchaser: str, input_data: dict) -> str:
-    seed = identifier_from_purchaser + "|" + repr(sorted(input_data.items()))
-    return hashlib.sha256(seed.encode()).hexdigest()[:32]
+_job_tag = legacy_tag  # pre-v2 tag; kept for tools that look up old results
 
 
 def _apollo_probe(settings: Settings, tag: str, budget: JobBudget):
     """Resolver probe: organisation names Apollo returns for a domain (free, no titles). Metered like any
-    treg call: sent only if the job's grant covers its max cost, and charged to it."""
+    treg call (`JobBudget.run`); a refused or failed probe raises, which the resolver treats as no answer."""
     async def probe(domain: str) -> list[str]:
-        if not budget.covers(APOLLO_MAX_COST_USD):
-            raise SpendCapReached("daily spend budget used up")
-        try:
-            found = await search_apollo(token=settings.treg_token, domain=domain, titles=None, per_page=5,
-                                        job_tag=f"{tag}-probe-{domain}", base_url=settings.treg_base_url,
-                                        timeout_s=settings.treg_timeout_s)
-        except TregError as e:
-            budget.charge_call(e)
-            raise
-        budget.charge_call(found)
+        found = await budget.run(APOLLO_MAX_COST_USD, lambda: search_apollo(
+            token=settings.treg_token, domain=domain, titles=None, per_page=5, job_tag=f"{tag}-probe-{domain}",
+            base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s,
+            trust_refusals=settings.trust_uncharged_refusals))
         names = []
         for row in found.people:
             org = row.get("organization")
@@ -166,15 +164,27 @@ def _apollo_probe(settings: Settings, tag: str, budget: JobBudget):
     return probe
 
 
+async def stored_result(ledger, identity: JobIdentity) -> Optional[str]:
+    """The result already delivered for this order. Results stored before the v2 identity are found by the old tag
+    only for an order created before v2, from the same tier, stored after that order was created (BL-36)."""
+    found = await ledger.get_result(identity.tag)
+    if found is None and identity.payment_id and identity.job_created_at is not None:
+        found = await ledger.get_legacy_result(identity.legacy_tag, identity.tier, identity.job_created_at)
+        if found is not None:
+            logger.info("Returning a result stored before the job identity upgrade")
+    return found
+
+
 async def process_job(identifier_from_purchaser: str, input_data: dict, settings: Optional[Settings] = None) -> str:
-    """MIP-003 job handler. Idempotent: the same purchaser identifier and input return the stored result."""
+    """MIP-003 job handler. Idempotent per order: a re-run of the same payment returns the stored result."""
     settings = settings or Settings.from_env()
-    tag = _job_tag(identifier_from_purchaser, input_data)
+    identity = await current_identity(identifier_from_purchaser, input_data, settings.tier)
+    tag = identity.tag
     token = job_tag_var.set(tag)
     ledger = get_ledger()
     try:
         try:
-            cached = await ledger.get_result(tag)
+            cached = await stored_result(ledger, identity)
         except Exception as e:  # cache problems must not block a paid job; it then runs normally
             logger.warning("Result cache unavailable: %s", type(e).__name__)
             cached = None
@@ -184,36 +194,43 @@ async def process_job(identifier_from_purchaser: str, input_data: dict, settings
 
         started = time.time()
         metrics = {"leads": 0, "llm_used": False}
-        budget = JobBudget(granted=0.0)  # nothing may be spent until _run_job has reserved
+        attempt_id = uuid.uuid4().hex  # this run's own spend reservation; a retry gets a new one
+
+        async def progress(snapshot: dict) -> None:
+            await ledger.progress(attempt_id, snapshot)
+
+        budget = JobBudget(granted=0.0, progress=progress)  # nothing may be spent until _run_job has reserved
         try:
-            result = await _run_job(input_data, settings, tag, metrics, budget)
+            # The hold of this attempt counts until a deadline derived from this limit (see ledger.reserve).
+            async with asyncio.timeout(settings.attempt_timeout_s):
+                result = await _run_job(input_data, settings, tag, metrics, budget, attempt_id)
         except Exception:
-            await _record(ledger, settings, tag, input_data, started, metrics, budget, "failed")
+            await _record(ledger, settings, tag, attempt_id, input_data, started, metrics, budget, "failed")
             raise
         try:
             await ledger.put_result(tag, settings.tier, result)
         except Exception as e:
             logger.warning("Could not store the result for re-runs: %s", type(e).__name__)
-        await _record(ledger, settings, tag, input_data, started, metrics, budget,
+        await _record(ledger, settings, tag, attempt_id, input_data, started, metrics, budget,
                       "delivered" if metrics["leads"] else "empty")
         return result
     finally:
         job_tag_var.reset(token)
 
 
-async def _record(ledger, settings: Settings, tag: str, input_data: dict, started: float, metrics: dict,
-                  budget: JobBudget, outcome: str) -> None:
-    """Settles the job: its actual spend replaces its reservation. Never raises (a paid job must not fail here);
-    if the ledger is down the reservation stays and keeps counting until the end of the UTC day."""
+async def _record(ledger, settings: Settings, tag: str, attempt_id: str, input_data: dict, started: float,
+                  metrics: dict, budget: JobBudget, outcome: str) -> None:
+    """Settles this attempt: its spend replaces its own hold (never another attempt's). Never raises (a paid job
+    must not fail here); if the ledger is down the hold stays open and counts until its counts_until."""
     now = time.time()
     row = {"tag": tag, "tier": settings.tier, "company": str(input_data.get("company") or "")[:100],
            "started_at": started, "finished_at": now, "duration_ms": int((now - started) * 1000),
            "price_tusdm": estimate(settings.tier)["price_tusdm"], "outcome": outcome, **metrics, **budget.totals()}
-    logger.info("job finished outcome=%s leads=%d treg_usd=%.4f enrich_usd=%.4f cost_assumed_calls=%d "
-                "duration_ms=%d", outcome, metrics["leads"], row["treg_usd"], row["enrich_usd"],
-                row["cost_assumed_calls"], row["duration_ms"])
+    logger.info("job finished outcome=%s leads=%d treg_usd=%.4f (unconfirmed %.4f) enrich_usd=%.4f "
+                "cost_assumed_calls=%d duration_ms=%d", outcome, metrics["leads"], row["treg_usd"],
+                row["unconfirmed_usd"], row["enrich_usd"], row["cost_assumed_calls"], row["duration_ms"])
     try:
-        await ledger.settle(row)
+        await ledger.settle(attempt_id, row, budget.snapshot())
     except Exception as e:
         logger.warning("Could not write the cost ledger: %s", type(e).__name__)
 
@@ -226,9 +243,10 @@ def _spend_ceiling(settings: Settings, company: str, domain: Optional[str]) -> f
     return round(apollo_calls * APOLLO_MAX_COST_USD + settings.job_budget_usd + enrich, 6)
 
 
-async def _reserve(settings: Settings, tag: str, want_usd: float) -> float:
+async def _reserve(settings: Settings, tag: str, attempt_id: str, want_usd: float, company: str) -> float:
     try:
-        granted = await get_ledger().reserve(tag, settings.tier, want_usd, settings.daily_spend_cap_usd)
+        granted = await get_ledger().reserve(attempt_id, tag, settings.tier, want_usd, settings.daily_spend_cap_usd,
+                                             lifetime_s=settings.attempt_timeout_s + ATTEMPT_GRACE_S, company=company)
     except Exception as e:
         # Without the ledger we cannot prove we are under the cap, so no treg call is made.
         logger.warning("Spend ledger unavailable, no treg calls for this job: %s", type(e).__name__)
@@ -239,7 +257,8 @@ async def _reserve(settings: Settings, tag: str, want_usd: float) -> float:
     return granted
 
 
-async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict, budget: JobBudget) -> str:
+async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict, budget: JobBudget,
+                   attempt_id: str) -> str:
     company = _clean(input_data.get("company"), 100)
     if not company:
         raise ValueError("company is required")
@@ -258,8 +277,8 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
         logger.warning("Suppression list unavailable: %s", type(e).__name__)
         suppressed = frozenset()
 
-    # Reserve before the first treg call (the resolver probe); a retry of this job reuses its reservation.
-    budget.granted = await _reserve(settings, tag, _spend_ceiling(settings, company, domain))
+    # Reserve before the first treg call (the resolver probe). Every attempt has its own hold.
+    budget.granted = await _reserve(settings, tag, attempt_id, _spend_ceiling(settings, company, domain), company)
     resolved = await resolve_company(company, domain,
                                      _apollo_probe(settings, tag, budget) if settings.treg_token else None)
     routed = await find_leads(settings, company, role, resolved, tag, suppressed=suppressed, budget=budget)
@@ -277,8 +296,7 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
             if enrich_settings.enrich_people_per_job == 0:
                 enrichment["status"] = "daily spend cap reached"
             else:
-                done = await enrich_leads(enrich_settings, leads, company, resolved.domain or "", tag)
-                budget.charge(done["spent_usd"], assumed=done["cost_assumed"], kind="enrich")
+                done = await enrich_leads(enrich_settings, leads, company, resolved.domain or "", tag, budget=budget)
                 enrichment.update(enriched=done["enriched"], status=done["error"] or "ok")
         for lead in leads:
             if lead.get("_signals", {}).get("enriched"):

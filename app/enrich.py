@@ -8,9 +8,11 @@ emails, phone numbers and addresses in the provider response are dropped.
 
 import logging
 import math
+from typing import Optional
 
 from .compliance import is_linkedin_profile, row_signals, same_company, to_public_lead
 from .settings import Settings
+from .spend import JobBudget
 from .treg_client import APOLLO_ENRICH_USD_PER_MATCH, TregError, enrich_apollo
 
 logger = logging.getLogger(__name__)
@@ -21,10 +23,13 @@ def needs_enrichment(lead: dict) -> bool:
         "*" in lead["name"] or not is_linkedin_profile(lead.get("profile_url") or ""))
 
 
-async def enrich_leads(settings: Settings, leads: list[dict], company: str, domain: str, tag: str) -> dict:
+async def enrich_leads(settings: Settings, leads: list[dict], company: str, domain: str, tag: str,
+                       budget: Optional[JobBudget] = None) -> dict:
     """Updates leads in place. Returns {"enriched": n, "spent_usd": x, "cost_assumed": bool, "error": str}.
 
+    The call is metered by the attempt's budget (kind "enrich"); None = unmetered (tools and tests only).
     spent_usd is the call's max cost when treg reported no valid cost, also for a failed call."""
+    budget = budget if budget is not None else JobBudget()
     todo = [lead for lead in leads if needs_enrichment(lead)]
     affordable = math.floor(settings.enrich_budget_usd / APOLLO_ENRICH_USD_PER_MATCH + 1e-9)
     todo = todo[: min(10, affordable)]
@@ -33,12 +38,12 @@ async def enrich_leads(settings: Settings, leads: list[dict], company: str, doma
         return outcome
 
     by_id = {lead["_signals"]["id"]: lead for lead in todo}
+    max_cost = min(settings.enrich_budget_usd, len(by_id) * APOLLO_ENRICH_USD_PER_MATCH + 0.005)
     try:
-        found = await enrich_apollo(token=settings.treg_token, apollo_ids=list(by_id),
-                                    max_cost_usd=min(settings.enrich_budget_usd,
-                                                     len(by_id) * APOLLO_ENRICH_USD_PER_MATCH + 0.005),
-                                    job_tag=f"{tag}-enrich", base_url=settings.treg_base_url,
-                                    timeout_s=settings.treg_timeout_s)
+        found = await budget.run(max_cost, lambda: enrich_apollo(
+            token=settings.treg_token, apollo_ids=list(by_id), max_cost_usd=max_cost, job_tag=f"{tag}-enrich",
+            base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s,
+            trust_refusals=settings.trust_uncharged_refusals), kind="enrich")
     except TregError as e:
         # Enrichment is an upgrade: without it the job still delivers the search results.
         logger.warning("Enrichment failed: %s", e)

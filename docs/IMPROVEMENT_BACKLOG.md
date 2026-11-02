@@ -365,8 +365,80 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** With the cap used up, `/availability` is unavailable and `/start_job` returns 503;
   both recover when the UTC day rolls over or spend settles below the cap.
 
+### BL-34 A retry released the crashed attempt's hold (review H1)
+- **Phase:** 1 · **Severity:** High · **Effort:** M · **Status:** Fixed in code (iteration 10, 2026-11-02; not deployed)
+- **Evidence (BL-13 code):** a retry with the same job tag reused the open reservation and its settle deleted
+  it. treg replays the retry's calls at $0, so the crashed attempt's real charges vanished from the ledger.
+- **Resolution:**
+  - **One row per attempt:** every attempt has its own `spend_attempts` row (random `attempt_id`).
+    `reserve` always inserts, and `settle` closes only `WHERE attempt_id = $1 AND status = 'open'`.
+  - **Write-ahead:** each call's max cost is written as pending before the call is sent (not sent if the
+    write fails). Afterwards the reported cost is confirmed, or the max cost stays assumed. A cancelled call
+    keeps its max cost.
+  - **Crash records:** an expired attempt's crash row holds confirmed plus unconfirmed (assumed + pending),
+    so the original attempt's charges stay in the books while the retry records its $0 replays.
+- **Tests:**
+  - crash after a paid call, then a zero-cost replay retry;
+  - three repeated crashes, then success;
+  - a crash during a treg call;
+  - a lost post-call progress write;
+  - partial execution;
+  - in-memory and PostgreSQL retry settlement.
+  - **Mutation checks:** both reuse and settle-by-tag are caught.
+
+### BL-35 An open hold stopped counting at UTC midnight (review M1)
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 10, 2026-11-02; not deployed)
+- **Resolution:**
+  - **Counting rule:** a hold counts while `status = 'open' AND now() < counts_until` (database clock).
+    `counts_until` = end of the UTC day containing created_at + `ATTEMPT_TIMEOUT_S` (1800 s) + 600 s grace.
+  - **Attempt time limit:** `_run_job` runs under `asyncio.timeout(ATTEMPT_TIMEOUT_S)`, so a run cannot
+    spend after its hold stops counting.
+  - **Expiry:** `expire_attempts` runs at startup, every 10 min and is idempotent across agents (row-level
+    `UPDATE … RETURNING`). It writes the crash row with finished_at = the hold's last instant, so it is not
+    counted again on a later day.
+  - **Late settle:** a settle after expiry is refused and logged.
+- **Tests:** a hold across midnight (memory and PostgreSQL); counts_until covering the lifetime; concurrent
+  expiry from two agents (exactly once).
+  - **Mutation check:** day-only counting is caught.
+
+### BL-36 Orders could share results and holds (review M2; resolves BL-14)
+- **Phase:** 1 · **Severity:** Medium · **Effort:** M · **Status:** Fixed in code (iteration 10, 2026-11-02; not deployed)
+- **Resolution:**
+  - **New tag:** `sha256("v2|agent|tier|payment_id|identifier|input")` (`app/job_identity.py`).
+  - **Where the payment id comes from:**
+    - It is the Payment Service's blockchain identifier, read from the SDK job record via the SDK's job
+      context (`masumi.hitl._job_context`, set in `_execute_agent_job` on the payment path and on recovery).
+    - `check_payment` has already matched it against the payment record.
+    - A context that does not match the call, or has no payment id, fails the job before any spend.
+  - **Legacy fallback (old tag):** only for an order created before `ledger_meta.identity_v2_since`, from the
+    same tier, stored after the order was created and before the upgrade.
+  - **Recovery:** uses the same identity.
+  - **Untouched:** payment verification, escrow, refunds and the state machine.
+- **Tests:**
+  - concurrent Standard and Pro orders with the same identifier and input;
+  - two orders through the real SDK payment path;
+  - a rejected payment never reaches the handler;
+  - recovery re-run;
+  - legacy fallback limits (memory and PostgreSQL);
+  - a mismatched context.
+  - **Mutation checks:** both are caught.
+- **Rollback:** `docs/ROLLBACK.md`, `scripts/ledger_rollback_prep.py`; `PAUSE_NEW_JOBS` stops new orders.
+
+### BL-37 treg key reuse, rounding and failed-call costs (review M3, L1-L3)
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 10, 2026-11-02; not deployed)
+- **Resolution:**
+  - **Idempotency key:** `bdlf-` + sha256(job tag, endpoint, canonical body)[:40], so a changed request gets
+    a new key instead of a 422.
+  - **Rounding:** the max cost is floored to 4 decimals and the same value is sent and assumed; a call
+    floored to 0 is not sent.
+  - **502:** the larger of `X-Treg-Cost-Micro` and the body's `charged_micro`.
+  - **Free refusals:** count $0 only with `TREG_TRUST_UNCHARGED_REFUSALS=true` (default off, pending treg's
+    confirmation).
+- **Still open:** treg's answers to the questions in `SECURITY_REVIEW.md` ("Open questions for treg").
+
 ### BL-14 Result cache key ignores the payment; cached forever
-- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Low · **Effort:** S · **Status:** Fixed in code by BL-36 (iteration 10; results are
+  still kept without expiry)
 - **Evidence:** `app/agent.py:137-139` (tag = purchaser identifier + input), `app/ledger.py:108-111`
   (`ON CONFLICT DO NOTHING`, no expiry). The same tag is the feedback reference (`app/agent.py:267`).
 - **Impact:** A new purchase that reuses an identifier and input gets the old result (stale data, someone
@@ -493,10 +565,12 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 6 | 2026-11-02 | BL-05 | Fixed in code (`b39e9f0`); 157 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
 | 7 | 2026-11-02 | BL-06 | Fixed in code (`4d02fca`); 171 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 | 8 | 2026-11-02 | BL-10 | Fixed in code (`c464d8d`); 175 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. |
-| 9 | 2026-11-02 | BL-13 | Fixed in code; 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
+| 9 | 2026-11-02 | BL-13 | Fixed in code (`4fd86b5`); 209 tests pass (incl. 8 PostgreSQL on a throwaway cluster). Not deployed. New: BL-33. |
+| 10 | 2026-11-02 | BL-34, BL-35, BL-36, BL-37 (review H1, M1, M2, M3, L1-L3); BL-14 | Fixed in code; 252 tests pass (incl. 13 PostgreSQL on a throwaway cluster); 12 of 12 mutation checks caught. Not deployed. |
 
 ## Recommended next iteration (Step C)
 
+Before any deploy: send treg the questions in `SECURITY_REVIEW.md` ("Open questions for treg").
 BL-33: since BL-13 a job arriving with the daily cap used up makes no treg call and fails, so the buyer pays
 and waits for a refund. Reporting `unavailable` while today's remainder is below one job's ceiling would stop
 such sales before payment (the BL-01 sale guard is the pattern; no payment code involved). After that:

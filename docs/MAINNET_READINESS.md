@@ -30,7 +30,9 @@ Pro preflight FAILs "Pro enrichment enabled" while `ENRICH_BUDGET_USD` is 0, on 
 | Quality labels honest (masked / no LinkedIn never High) | Fixed in code, not deployed | BL-02, BL-03 |
 | Payment amount guarantee documented and enforced | Fixed in code, not deployed (verified against Payment Service 0.30.0 source; 0.29 to confirm) | BL-08 |
 | Recovery never resubmits | Fixed in code, not deployed; no fault injected on the live stack yet | BL-09 |
-| Spend cap holds under concurrency | Fixed in code, not deployed; free-call cost header to confirm on the live stack | BL-13 |
+| Spend cap holds under concurrency, crashes, retries and UTC midnight | Fixed in code, not deployed; a hard bound needs treg's answers (SECURITY_REVIEW "Open questions for treg") | BL-13, BL-34, BL-35, BL-37 |
+| Orders never share results, holds or treg keys (tier + payment id) | Fixed in code, not deployed | BL-36 (BL-14) |
+| Rollback path with open holds | Runbook and script (`docs/ROLLBACK.md`), not exercised on the server | BL-36 |
 | Gemini timeout | Fixed in code, not deployed (45 s, `GEMINI_TIMEOUT_S`) | BL-10 |
 | At least 3 real users tested the output | Open | BL-22 |
 | Alerting on availability, rejected payments, spend | Open | BL-24 |

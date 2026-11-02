@@ -58,16 +58,52 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
 
 ### Spend controls
 - Per-call max-cost header, per-job budget, daily cap that fails closed when the ledger is unreadable.
-- Since BL-13 (fixed in code, not deployed):
-  - Each job reserves its worst case before its first treg call; on PostgreSQL this is serialized across
-    both agents (`app/ledger.py` `reserve`, advisory lock).
-  - Every treg call is metered against the grant, including Apollo and the domain probes (`app/spend.py`).
-  - A missing or invalid cost header, an error response without one, or a timeout counts at the call's max
-    cost.
-  - Crashed jobs keep their hold until the end of the UTC day.
-- Remaining bound: the cap can only be exceeded if treg charges more than the max cost we send.
+- Since BL-13 and BL-34 to BL-37 (fixed in code, not deployed):
+  - **Reservation per attempt:** every attempt (run) of a job reserves its worst case in its own
+    `spend_attempts` row before its first treg call. On PostgreSQL this is serialized across both agents
+    (`app/ledger.py` `reserve`, advisory lock). A retry gets a new row; nothing releases another attempt's row.
+  - **Metering:**
+    - every treg call, including Apollo and the domain probes, must fit in the attempt's grant;
+    - its max cost is written ahead to the ledger, and the call is not sent if that write fails
+      (`app/spend.py`);
+    - confirmed cost is kept apart from assumed (max-cost) amounts.
+  - **Unknown costs:**
+    - a missing or invalid cost header, an error response without one, a timeout or a cancelled call counts
+      at the call's max cost, floored to the 4 decimals sent;
+    - a 502's `charged_micro` counts when it is larger than the header.
+  - **Hold lifetime:**
+    - open holds count until the end of the UTC day containing start + `ATTEMPT_TIMEOUT_S` + 10 min, also
+      across midnight;
+    - the attempt timeout guarantees a run cannot spend after that;
+    - expiry records a crash row with confirmed and unconfirmed amounts.
+  - **Job identity:** includes tier and the verified payment id, so orders share no result, hold or treg key.
+- Remaining bound: the cap holds on our accounting. That it is a hard bound depends on treg never charging
+  more than the max cost sent (see "Open questions for treg"). It is not claimed as a strict hard cap.
 - With the cap used up, paid jobs fail and wait for a refund instead of being refused before payment (BL-33,
   Low).
+
+### Open questions for treg (must be confirmed before calling the cap a hard bound)
+1. **Direct Apollo endpoints:** on `apollo.people.search` and `apollo.people.bulk_enrich`, can the final
+   charge exceed what treg reserved against `X-Treg-Route-Max-Cost`, or is that a hard upper bound on the
+   charge?
+2. **Apollo search price:** what does `apollo.people.search` cost per call, and can it change without notice?
+3. **Bulk enrichment:** how is the `apollo.people.bulk_enrich` reservation sized (per id sent, per expected
+   match, or for 10 matches)? Is billing per match, at what price, and is a request refused when its max cost
+   is below the reservation?
+4. **Cost header coverage:** is `X-Treg-Cost-Micro` present on every 2xx, on every non-2xx (provider 4xx/5xx,
+   402, 409, 422, 429, 502), and on idempotent replays?
+5. **502 `route_failed`:** where is `charged_micro` (top level or under `detail`), and does
+   `X-Treg-Cost-Micro` equal it when both are present?
+6. **Free refusals:** are 402 `route_max_cost`, 402 `insufficient_balance`, 429 `share_busy`, 409 (in flight)
+   and 422 (key reused) never charged? Only then should `TREG_TRUST_UNCHARGED_REFUSALS` be turned on.
+7. **Formats:** what precision does `X-Treg-Route-Max-Cost` accept, and what is the maximum length and allowed
+   character set of `Idempotency-Key` (we send `bdlf-` + 40 hex characters)?
+
+Facts from treg's guide (skill.md, read 2026-11-02), not yet verified against the live service:
+- the max cost refuses a call whose reservation would exceed it (402, nothing charged);
+- replays cost 0 and return `X-Treg-Cost-Micro: 0`; keys last 24 h;
+- a duplicate in flight gets 409; a reused key with a different body gets 422;
+- failed calls are free, except that 502 `route_failed` bills `charged_micro`; timeouts may be charged.
 
 ### Infrastructure
 - Payment Service bound to `127.0.0.1:3001`; agents public on 8080/8081 behind InstaBox HTTPS.

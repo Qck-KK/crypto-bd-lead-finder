@@ -75,3 +75,23 @@ class V2Payment(Payment):
 def install() -> None:
     """Point the SDK's server at V2Payment (it looks up `Payment` in masumi.server at call time)."""
     masumi.server.Payment = V2Payment
+
+
+async def current_job() -> Optional[tuple[Dict[str, Any], Optional[float]]]:
+    """The SDK job record of the job whose handler is running, and when its row was created (PostgreSQL job storage
+    only), or None outside a job. masumi 1.2.0 sets this context in `_execute_agent_job` right before it calls the
+    start_job handler, on the first run and on recovery; it is cleared after the handler returns."""
+    from masumi.hitl import _job_context
+
+    ctx = _job_context.get()
+    if not ctx or not ctx.get("job_id") or ctx.get("job_manager") is None:
+        return None
+    manager, job_id = ctx["job_manager"], ctx["job_id"]
+    job = await manager.get_job(job_id)
+    if job is None:
+        from .job_identity import JobIdentityError
+
+        raise JobIdentityError(f"job {job_id} not found")
+    storage = getattr(manager, "storage", None)
+    created_at = await storage.created_at(job_id) if hasattr(storage, "created_at") else None
+    return {**job, "job_id": job.get("job_id") or job_id}, created_at

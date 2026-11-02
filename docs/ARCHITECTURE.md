@@ -28,7 +28,11 @@ the result hash.
 
 ## Money safety
 - Paid provider calls: per-call max cost header, per-job budget, daily cap across both agents (shared ledger).
-  A job reserves its worst case before its first treg call (`spend_reservations`, advisory lock); every call,
-  Apollo included, must fit in what is left of that grant (`app/spend.py`), and an unknown cost counts as the
-  call's max cost. Settling swaps the reservation for the actual spend.
+  Every attempt (run) of a job reserves its worst case in its own `spend_attempts` row before its first treg
+  call (advisory lock). Every call, Apollo included, must fit in what is left of that grant and is written to
+  the ledger before it is sent (`app/spend.py`); an unknown cost counts as the call's max cost. Settling
+  replaces only that attempt's hold with its actual spend. An unsettled hold counts until `counts_until`
+  (end of the UTC day of start + attempt timeout), then becomes a crashed cost row.
+- Job identity (`app/job_identity.py`): tier + the order's verified payment id (from the SDK job context) key
+  the result cache, spend attempts and treg idempotency keys. Rollback: `docs/ROLLBACK.md`.
 - Paid enrichment stays off on Preprod by default: test-token buyers must not spend real treg balance.

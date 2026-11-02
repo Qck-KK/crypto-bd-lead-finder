@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+### Iteration 10 — BL-34 to BL-37: attempt-level spend holds, midnight-safe expiry, order identity (2026-11-02)
+- Every run of a job (attempt) has its own spend reservation (`spend_attempts`). A retry gets a new one, and
+  settling closes only its own, so a crashed attempt's possible spend is never released by its retry
+  (treg replays the retry's calls at $0).
+- Each treg call's max cost is written to the ledger before the call is sent; the call is not sent if that
+  write fails. Confirmed cost and assumed (max-cost) amounts are kept apart.
+- Open holds count until the end of the UTC day containing start + `ATTEMPT_TIMEOUT_S` (default 1800 s)
+  + 10 min, also after midnight. A run is cancelled at `ATTEMPT_TIMEOUT_S` (the job fails, refundable).
+  Unsettled holds then expire into `crashed` cost rows; this runs at startup and every 10 min, exactly once
+  across both agents.
+- Job identity = agent, tier and the order's payment id (from the SDK job record, verified by the payment
+  check) + purchaser identifier + input. Standard and Pro orders, or two payments with the same identifier
+  and input, no longer share results, holds or treg keys (also fixes BL-14).
+- Results stored under the old tag are used only for orders created before the upgrade, from the same tier.
+- treg idempotency keys hash the request body; the max cost is floored to the 4 decimals sent; a 502's
+  `charged_micro` counts. Free treg refusals count $0 only with `TREG_TRUST_UNCHARGED_REFUSALS=true`.
+- New: `PAUSE_NEW_JOBS`; `docs/ROLLBACK.md`, `scripts/ledger_rollback_prep.py`. New `job_costs` column
+  `unconfirmed_usd`; new tables `spend_attempts`, `ledger_meta`; the migration is serialized across agents.
+- Payment verification, escrow, refunds and the payment state machine are unchanged.
+
 ### Iteration 9 — BL-13: the daily spend cap holds under concurrency (2026-11-02)
 - A job reserves its worst-case treg spend before its first call: domain probes and the Apollo search at $0.01
   each, the routed budget, and the Pro enrichment budget when on. It gets what the cap still allows. On

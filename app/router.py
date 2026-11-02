@@ -125,19 +125,16 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
 
     if resolved.domain:
         step = SearchStep("apollo", resolved.domain)
-        if not budget.covers(APOLLO_MAX_COST_USD):
-            step.error = "daily spend budget used up"
-        else:
-            try:
-                found = await search_apollo(token=settings.treg_token, domain=resolved.domain,
-                                            titles=role_terms(role) or None, per_page=FETCH_ROWS,
-                                            job_tag=f"{tag}-ap", base_url=settings.treg_base_url,
-                                            timeout_s=settings.treg_timeout_s)
-                step.rows, step.cost_usd = len(found.people), budget.charge_call(found)
-                step.kept = pool.add(found.people, found.served_by, resolved.domain, domain_evidence)
-                succeeded = True
-            except TregError as e:
-                step.error, step.cost_usd = str(e), budget.charge_call(e)
+        try:
+            found = await budget.run(APOLLO_MAX_COST_USD, lambda: search_apollo(
+                token=settings.treg_token, domain=resolved.domain, titles=role_terms(role) or None,
+                per_page=FETCH_ROWS, job_tag=f"{tag}-ap", base_url=settings.treg_base_url,
+                timeout_s=settings.treg_timeout_s, trust_refusals=settings.trust_uncharged_refusals))
+            step.rows, step.cost_usd = len(found.people), found.cost_usd
+            step.kept = pool.add(found.people, found.served_by, resolved.domain, domain_evidence)
+            succeeded = True
+        except TregError as e:  # also SpendCapReached / SpendLedgerUnavailable: not sent, cost 0
+            step.error, step.cost_usd = str(e), e.cost_usd
         result.steps.append(step)
 
     paid = []
@@ -155,18 +152,19 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
             step.error = "job budget used up" if budget.remaining >= 0.001 else "daily spend budget used up"
             result.steps.append(step)
             break
+        max_cost = min(settings.treg_max_cost_usd, remaining)
         try:
-            found = await search_people(
+            found = await budget.run(max_cost, lambda: search_people(
                 token=settings.treg_token, company=company, role=role, company_domain=domain,
-                limit=FETCH_ROWS if (domain and role) else settings.max_people,
-                max_cost_usd=min(settings.treg_max_cost_usd, remaining), job_tag=f"{tag}-r{i}",
-                base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s)
-            step.rows, step.cost_usd = len(found.people), budget.charge_call(found)
+                limit=FETCH_ROWS if (domain and role) else settings.max_people, max_cost_usd=max_cost,
+                job_tag=f"{tag}-r{mode}", base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s,
+                trust_refusals=settings.trust_uncharged_refusals))
+            step.rows, step.cost_usd = len(found.people), found.cost_usd
             step.provider = f"treg routed ({mode}) via {found.served_by or '?'}"
             step.kept = pool.add(found.people, found.served_by, domain, domain_evidence if domain else "name")
             succeeded = True
         except TregError as e:
-            step.error, step.cost_usd = str(e), budget.charge_call(e)
+            step.error, step.cost_usd = str(e), e.cost_usd
         result.spent_usd += step.cost_usd
         result.steps.append(step)
 

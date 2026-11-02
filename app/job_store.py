@@ -82,6 +82,13 @@ class PostgresJobStorage(JobStorage):
                 job_id, json.dumps(data), data.get("status", ""),
             )
 
+    async def created_at(self, job_id: str) -> Optional[float]:
+        """When the job row (the order) was created, epoch seconds; restricts the pre-v2 result fallback."""
+        pool = await self._p()
+        v = await pool.fetchval(f"SELECT extract(epoch FROM created_at)::float8 FROM {self._t} WHERE job_id = $1",
+                                job_id)
+        return float(v) if v is not None else None
+
     async def delete_job(self, job_id: str) -> None:
         pool = await self._p()
         await pool.execute(f"DELETE FROM {self._t} WHERE job_id = $1", job_id)
@@ -139,7 +146,8 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
     - running, escrow still locked: runs again; the stored result (or treg's idempotency keys) keeps
       the on-chain hash identical and avoids paying providers twice.
     """
-    from .agent import _job_tag  # local import: agent imports this module's dependencies
+    from .agent import stored_result  # local import: agent imports this module's dependencies
+    from .job_identity import identity_for_job
     from .ledger import get_ledger
 
     now = time.time() if now is None else now
@@ -173,8 +181,11 @@ async def recover_jobs(server: MasumiAgentServer, now: Optional[float] = None) -
                 if state in _RESULT_ON_CHAIN or action in _SUBMIT_IN_PROGRESS:
                     # Result on-chain, or its submission already handed to the Payment Service: never
                     # run or submit again; the Payment Service finishes (or retries) the submission.
-                    tag = _job_tag(job["identifier_from_purchaser"], job.get("input_data") or {})
-                    stored = await get_ledger().get_result(tag)
+                    created = await manager.storage.created_at(job_id) if hasattr(manager.storage, "created_at") \
+                        else None
+                    identity = identity_for_job({**job, "job_id": job_id}, getattr(server, "tier", "standard"),
+                                                created)
+                    stored = await stored_result(get_ledger(), identity)
                     if stored is not None:
                         await manager.storage.update_job(job_id, {"status": JobStatus.COMPLETED.value,
                                                                   "result": stored})
