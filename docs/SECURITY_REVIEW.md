@@ -19,10 +19,14 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
 ### Payments and escrow
 - **Work only after funds are locked** — `app/server.py:65-87` checks the record before calling the SDK
   handler; failures and unreadable status reject (fail closed). Good.
-- **Amount check is weaker than documented (BL-08, High).** It sums `RequestedFunds`, which is what we
-  requested; the live record has no `PaidFunds`. Missing `blockchainIdentifier` / `inputHash` are accepted.
-  Real protection is the Payment Service's `FundsLocked` state; what that guarantees about amount is not yet
-  verified.
+- **Amount guarantee (BL-08, fixed in code 2026-11-02).** The Payment Service sets `FundsLocked` only after
+  comparing the on-chain escrow output with the request's `RequestedFunds` (native tokens exactly, ADA at
+  least, same token set) and the datum; a mismatch becomes `FundsOrDatumInvalid`
+  (`src/services/transactions/tx-sync/tx/initial-payment.ts`, `packages/payment-core/src/payment-amounts.ts`,
+  read in the local 0.30.0 checkout). So `RequestedFunds` on a `FundsLocked` record is the locked amount. Our
+  check binds it to the job and now rejects records without `blockchainIdentifier` or `inputHash` (and jobs
+  without an input hash); the non-existent `PaidFunds` fallback is gone. Residual: the deployed service is
+  0.29 and the shallow 0.30.0 clone has no history to confirm 0.29 has the same check.
 - **Duplicate execution** — SDK fires the callback once per payment instance; re-runs return the stored result
   (`app/agent.py:165-172`); treg calls carry idempotency keys. A crash during result submission may lead to
   a second submit attempt (BL-09, Medium).
@@ -69,7 +73,7 @@ refer to `docs/IMPROVEMENT_BACKLOG.md`.
 - InstaBox platform isolation and its proxy's header handling.
 
 ## Next security steps (in order)
-1. BL-08: establish what `FundsLocked` guarantees; reject records missing identity fields.
+1. ~~BL-08~~ fixed in code; confirm the amount check in the deployed 0.29 Payment Service source.
 2. BL-09: treat submit-in-progress as submitted during recovery.
 3. BL-13: reserve budget at job start; missing cost header = max cost.
 4. BL-15 / BL-16 / BL-17: rate limit `/start_job`, generic error messages, hide docs.

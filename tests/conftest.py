@@ -131,7 +131,9 @@ def payment_mock(monkeypatch):
         state["status_calls"] += 1
         if isinstance(state["record"], Exception):
             raise state["record"]
-        return {"status": "success", "data": {**state["record"], "blockchainIdentifier": blockchain_identifier}}
+        # Like the Payment Service: the record carries the input hash this payment was created with.
+        return {"status": "success", "data": {"inputHash": getattr(self, "input_hash", None), **state["record"],
+                                              "blockchainIdentifier": blockchain_identifier}}
 
     monkeypatch.setattr(masumi.server.Payment, "check_payment_status_by_identifier",
                         check_payment_status_by_identifier)

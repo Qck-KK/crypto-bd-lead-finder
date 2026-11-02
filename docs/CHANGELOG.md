@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Iteration 3 — BL-08: payment check binds the escrow guarantee to the job (2026-11-02)
+- Documented what `FundsLocked` guarantees: the Payment Service compares the on-chain locked amount with the
+  request's `RequestedFunds` before setting it (source references in `app/server.py` `check_payment`).
+- A payment record without `blockchainIdentifier` or `inputHash`, or a job without an input hash, is now
+  rejected (was accepted). The `PaidFunds` fallback (a field the Payment Service does not return) is removed;
+  malformed amounts count as 0.
+- README "Payment acceptance" wording corrected.
+
 ### Iteration 2 — BL-02 + BL-03: honest quality labels and profile links (2026-11-02)
 - A lead with a masked name and no individual LinkedIn profile is rated at most Medium (reason stated).
 - Every lead carries `score_breakdown` (points per component, incl. the employment check ±5) and a reason

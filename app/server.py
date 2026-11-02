@@ -2,7 +2,8 @@
 
 Payment acceptance runs when the Payment Service reports FundsLocked, before any provider is called.
 The job only runs if the payment is for this agent, in the expected token, at least the expected
-amount, for this job's input hash. Otherwise the job is marked failed and nothing is delivered (the
+amount, for this job's input hash (see `check_payment` for what the Payment Service guarantees about
+the locked amount). Otherwise the job is marked failed and nothing is delivered (the
 buyer can reclaim the escrow after the result deadline). A status lookup that keeps failing is
 treated the same way: no proof of payment, no work.
 """
@@ -37,20 +38,42 @@ def expected_payment(network: str, tier: str) -> tuple[str, int]:
     return unit, amount
 
 
+def _atomic(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def check_payment(payment: dict, *, job: dict, agent_identifier: str, payment_id: str, unit: str,
                   min_amount: int) -> list[str]:
-    """Problems with a payment record from /payment/resolve-blockchain-identifier; [] means accept."""
+    """Problems with a payment record from /payment/resolve-blockchain-identifier; [] means accept.
+
+    What the record proves (Payment Service source, `initial-payment.ts` `updateInitialPaymentTransaction`
+    and `payment-core/payment-amounts.ts` `checkPaymentAmountsMatch`): `onChainState` becomes
+    `FundsLocked` only after the on-chain escrow output was compared with this request's
+    `RequestedFunds` (native tokens exactly, ADA at least, same set of tokens) and with its datum
+    (seller, times, no result hash); any mismatch sets `FundsOrDatumInvalid` instead. So
+    `RequestedFunds` on a `FundsLocked` record is the amount actually locked, and the record has no
+    separate paid-amount field. Our checks bind that guarantee to this job: same payment id, this
+    agent, this input hash, our token and price. Every identity field must be present.
+    """
     problems = []
-    if payment.get("blockchainIdentifier") not in (None, payment_id):
+    if not payment.get("blockchainIdentifier"):
+        problems.append("payment id missing")
+    elif payment["blockchainIdentifier"] != payment_id:
         problems.append("payment id mismatch")
     if payment.get("onChainState") != "FundsLocked":
         problems.append(f"funds not locked (state {payment.get('onChainState')})")
     if payment.get("agentIdentifier") != agent_identifier:
         problems.append("payment is for another agent")
-    if job.get("input_hash") and payment.get("inputHash") and payment["inputHash"] != job["input_hash"]:
+    if not job.get("input_hash") or not payment.get("inputHash"):
+        problems.append("input hash missing")
+    elif payment["inputHash"] != job["input_hash"]:
         problems.append("input hash mismatch")
-    funds = payment.get("RequestedFunds") or payment.get("PaidFunds") or []
-    paid = sum(int(f.get("amount", 0)) for f in funds if isinstance(f, dict) and f.get("unit") == unit)
+    funds = payment.get("RequestedFunds")
+    funds = funds if isinstance(funds, list) else []
+    paid = sum(_atomic(f.get("amount")) for f in funds if isinstance(f, dict) and f.get("unit") == unit)
     if paid < min_amount:
         problems.append(f"amount {paid} below expected {min_amount} in the expected token")
     return problems

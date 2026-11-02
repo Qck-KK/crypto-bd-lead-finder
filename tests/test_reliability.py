@@ -131,11 +131,54 @@ def _record(**over):
     ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "100000"}]}, "below expected"),
     ({"RequestedFunds": [{"unit": "", "amount": "270000000"}]}, "below expected"),  # ADA, not tUSDM
     ({"blockchainIdentifier": "other"}, "payment id mismatch"),
+    # BL-08: identity fields must be present, not merely "not different".
+    ({"blockchainIdentifier": None}, "payment id missing"),
+    ({"blockchainIdentifier": ""}, "payment id missing"),
+    ({"inputHash": None}, "input hash missing"),
+    ({"inputHash": ""}, "input hash missing"),
+    ({"agentIdentifier": None}, "another agent"),
+    ({"onChainState": "FundsOrDatumInvalid"}, "funds not locked"),  # Payment Service saw a wrong amount
+    ({"onChainState": None}, "funds not locked"),
+    # Amounts: no PaidFunds fallback (the field does not exist), malformed entries count as 0.
+    ({"RequestedFunds": None, "PaidFunds": [{"unit": TUSDM_UNIT, "amount": "270000"}]}, "below expected"),
+    ({"RequestedFunds": []}, "below expected"),
+    ({"RequestedFunds": {"unit": TUSDM_UNIT, "amount": "270000"}}, "below expected"),  # not a list
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "abc"}]}, "below expected"),
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": None}]}, "below expected"),
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "269999"}]}, "below expected"),
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "270000"}, {"unit": "", "amount": "2000000"}]}, None),
+    ({"RequestedFunds": [{"unit": TUSDM_UNIT, "amount": "300000"}]}, None),
 ])
 def test_check_payment(over, problem):
     problems = check_payment(_record(**over), job={"input_hash": "h1"}, agent_identifier="agent-1",
                              payment_id="pid", unit=TUSDM_UNIT, min_amount=270000)
-    assert (problems == []) if problem is None else any(problem in p for p in problems)
+    assert (problems == []) if problem is None else any(problem in p for p in problems), problems
+
+
+@pytest.mark.parametrize("job", [{}, {"input_hash": ""}, {"input_hash": None}])
+def test_check_payment_rejects_job_without_input_hash(job):
+    problems = check_payment(_record(), job=job, agent_identifier="agent-1", payment_id="pid",
+                             unit=TUSDM_UNIT, min_amount=270000)
+    assert "input hash missing" in problems
+
+
+def test_check_payment_reports_every_problem():
+    problems = check_payment({}, job={}, agent_identifier="agent-1", payment_id="pid", unit=TUSDM_UNIT,
+                             min_amount=270000)
+    assert len(problems) == 5
+
+
+@respx.mock(assert_all_called=False)
+async def test_payment_without_input_hash_is_rejected_before_any_work(env, payment_mock, gemini, respx_mock):
+    respx_mock.route(host="a").pass_through()
+    apollo = respx_mock.post(APOLLO_URL).mock(side_effect=_apollo)
+    payment_mock["record"]["inputHash"] = None
+    server = _server()
+    job_id = await _start(server)
+    await payment_mock["callback"]({"blockchainIdentifier": CHAIN_ID})
+    job = await server.job_manager.get_job(job_id)
+    assert job["status"] == "failed" and "input hash missing" in job["error"]
+    assert not apollo.called and payment_mock["submitted"] is None
 
 
 def _server(storage=None):

@@ -41,7 +41,8 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
    company matching are good on this sample. See BL-02, BL-03, BL-20.
 3. **Do payment, idempotency, recovery and backups survive real faults?** Partly. The designs are sound
    and unit/integration tested (mocks + PostgreSQL), but: the amount check compares our own requested
-   funds, not what was paid (BL-08); recovery does not look at an in-flight result submission (BL-09);
+   funds, not what was paid (BL-08; fixed in code in iteration 3: the Payment Service matches the locked
+   amount before `FundsLocked`, and identity fields are now required); recovery does not look at an in-flight result submission (BL-09);
    no fault has been injected on the live stack; a restore drill passed once (2026-11-02) and off-host
    copies are manual (BL-25).
 
@@ -143,7 +144,22 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
   LinkedIn coverage; compliance allowlist tests still pass.
 
 ### BL-08 Payment amount check compares our own request, not the payment
-- **Phase:** 1 · **Severity:** High · **Effort:** M (needs Payment Service investigation) · **Status:** Open
+- **Phase:** 1 · **Severity:** High · **Effort:** M (needs Payment Service investigation) · **Status:** Fixed in code
+  (iteration 3, 2026-11-02; not deployed)
+- **Resolution (iteration 3):** Guarantee established from the Payment Service source (local checkout
+  `masumi-node/masumi-payment-service`, release 0.30.0): `updateInitialPaymentTransaction`
+  (`src/services/transactions/tx-sync/tx/initial-payment.ts`) sets `FundsLocked` only if
+  `checkPaymentAmountsMatch` (`packages/payment-core/src/payment-amounts.ts`) finds every requested native
+  token locked in exactly the requested amount, ADA at least as requested, the same token set, and a datum that
+  matches seller, times and no result hash; otherwise the record becomes `FundsOrDatumInvalid` and waits for
+  manual action. Spoofed outputs without the buyer as input are ignored. So `RequestedFunds` on a `FundsLocked`
+  record *is* the locked amount, and there is no `PaidFunds` field (the resolve endpoint includes only
+  `RequestedFunds`, `WithdrawnForSeller`, `WithdrawnForBuyer`). `app/server.py` `check_payment` now rejects a
+  missing `blockchainIdentifier` or `inputHash` (or a job without an input hash), drops the `PaidFunds`
+  fallback and treats malformed amounts as 0; the docstring cites the source. README wording corrected. Tests:
+  `tests/test_reliability.py` (missing ids, `FundsOrDatumInvalid`, malformed/short/non-list funds, a job
+  without input hash, an end-to-end rejection with no provider call). Residual: the deployment runs 0.29; the
+  local clone is shallow, so 0.29 having the same check is likely but not confirmed from source.
 - **Description:** `check_payment` sums `RequestedFunds` (falls back to `PaidFunds`). The live record has no
   `PaidFunds`; `RequestedFunds` is the amount our own `/payment` call asked for. The check therefore confirms
   our configuration, not what the buyer locked. Missing `blockchainIdentifier` or `inputHash` also pass.
@@ -358,10 +374,12 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | # | Date | Issue | Result |
 |---|---|---|---|
 | 1 | 2026-11-02 | BL-01 | Fixed in code (`f255fc7`); 112 tests pass (incl. PostgreSQL). Not deployed. |
-| 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code; 120 tests pass (incl. PostgreSQL). Not deployed. |
+| 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code (`03cdbdd`); 120 tests pass (incl. PostgreSQL). Not deployed. |
+| 3 | 2026-11-02 | BL-08 | Fixed in code; 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
 
 ## Recommended next iteration (Step C)
 
-BL-08 (payment amount guarantee): establish from the Payment Service 0.29 source what `FundsLocked`
-guarantees about amount and asset, reject records missing `blockchainIdentifier` / `inputHash`, and correct
-the README claim. Then BL-09 (recovery during result submission).
+BL-09 (recovery during result submission): treat a `FundsLocked` record whose `NextAction.requestedAction`
+is a submit-in-progress state as already submitted, so recovery marks the job completed from the stored
+result instead of calling `complete_payment` again. The `NextAction` shape is in the same resolve endpoint
+read for BL-08. Then BL-04 / BL-05 (domain evidence and probe-error caching, both in the resolver path).
