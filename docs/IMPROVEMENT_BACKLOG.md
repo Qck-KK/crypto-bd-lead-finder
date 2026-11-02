@@ -214,7 +214,17 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 - **Acceptance criteria:** Recovery test per state with the expected final job status.
 
 ### BL-04 Unconfirmed domains are scored as "company confirmed by domain"
-- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Open
+- **Phase:** 1 · **Severity:** Medium · **Effort:** S · **Status:** Fixed in code (iteration 5, 2026-11-02; not deployed)
+- **Resolution (iteration 5):** `app/router.py` `find_leads` passes `"domain"` only when `resolved.verified`,
+  otherwise `"given domain"` (Apollo step and routed domain step). `app/scoring.py` `COMPANY_POINTS` /
+  `COMPANY_REASONS`: confirmed domain 10 points "company confirmed by domain"; given-but-unconfirmed domain 6
+  points "company matched by name (domain given but not confirmed)" (the compliance filter still required a
+  name match or a link on the company's own site); name 6 "company matched by name"; none 0 "company not
+  confirmed". `app/verify.py` keeps inferring "current" from Apollo's domain search for both domain kinds;
+  "employer confirmed" was already gated on a confirmed domain. Tests in `tests/test_quality.py`: evidence
+  table (4 cases), router with confirmed vs. unconfirmed domain (evidence, points, reason, employment check),
+  routed domain search on an unconfirmed domain. Effect: an unconfirmed-domain lead loses 4 points; a lead at
+  the High boundary (70–73) can drop to Medium.
 - **Evidence:** `app/router.py:124,154` pass evidence `"domain"` whenever a domain was searched, also when
   `resolved.verified` is false; `app/scoring.py:80-82` then adds 10 points and the reason.
 - **Root cause:** Evidence reflects the search mode, not whether the domain was confirmed.
@@ -400,10 +410,12 @@ Two results are a small sample; the numbers show the pattern, not a rate to rely
 | 1 | 2026-11-02 | BL-01 | Fixed in code (`f255fc7`); 112 tests pass (incl. PostgreSQL). Not deployed. |
 | 2 | 2026-11-02 | BL-02, BL-03 | Fixed in code (`03cdbdd`); 120 tests pass (incl. PostgreSQL). Not deployed. |
 | 3 | 2026-11-02 | BL-08 | Fixed in code (`170f99e`); 140 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. |
-| 4 | 2026-11-02 | BL-09 | Fixed in code; 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
+| 4 | 2026-11-02 | BL-09 | Fixed in code (`debd1e3`); 147 tests pass (incl. PostgreSQL on a throwaway cluster). Not deployed. New: BL-32. |
+| 5 | 2026-11-02 | BL-04 | Fixed in code; 154 tests pass (incl. 5 PostgreSQL on a throwaway cluster). Not deployed. BL-05 kept separate (cache logic, not scoring). |
 
 ## Recommended next iteration (Step C)
 
-BL-04 + BL-05 (resolver path): pass `"domain"` evidence only for a confirmed domain, and do not cache a
-domain probe that raised. Both touch `app/resolver.py` / `app/router.py` / `app/scoring.py` and are small
-and fully testable with mocks. BL-32 is a one-line follow-up once the V2 state semantics are confirmed.
+BL-05: do not cache a domain resolution whose probe raised (`app/resolver.py` `resolve_company`), so one treg
+hiccup does not push a company onto the unconfirmed-domain / paid name-search path for 24 h. Small and fully
+testable with mocks. After that: BL-06 (look-alike company names), then BL-10 (Gemini timeout). BL-32 is a
+one-line follow-up once the V2 state semantics are confirmed.

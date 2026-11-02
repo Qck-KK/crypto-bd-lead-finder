@@ -6,7 +6,7 @@
 | Seniority         | 20 head/VP/director/C-level/founder, 12 lead/manager/senior, 5 |
 | Name              | 15 full name, 5 masked by the provider ("S***h")               |
 | Profile link      | 20 LinkedIn profile, 6 company website, 0 none                |
-| Company evidence  | 10 matched by domain, 6 by name, 0 none                        |
+| Company evidence  | 10 confirmed domain, 6 by name or unconfirmed given domain, 0 |
 
 High >= 70, Medium >= 45, otherwise Low. A lead the buyer cannot identify (masked name and no individual
 profile) is rated at most Medium, whatever its score. Each lead carries its points per component
@@ -38,6 +38,16 @@ def seniority(title: str) -> str:
 
 CAP_REASON = "rated at most Medium: masked name and no individual profile"
 
+# Company evidence, set by the router from how the people were found:
+#   "domain"       searched by a domain the data provider confirmed belongs to this company
+#   "given domain" searched by the buyer's domain, which could not be confirmed (the lead still had to match
+#                  the company name or link to the company's own site to get here), so worth no more than a name match
+#   "name"         searched by company name
+COMPANY_POINTS = {"domain": 10, "given domain": 6, "name": 6}
+COMPANY_REASONS = {"domain": "company confirmed by domain",
+                   "given domain": "company matched by name (domain given but not confirmed)",
+                   "name": "company matched by name"}
+
 
 def quality_label(score: int) -> str:
     return "High" if score >= 70 else "Medium" if score >= 45 else "Low"
@@ -59,7 +69,8 @@ def rate(lead: dict, score: int, reasons: list[str], breakdown: dict) -> None:
 
 
 def score_parts(lead: dict, role: Optional[str], company_evidence: str) -> tuple[int, list[str], dict]:
-    """(score, reasons, points per component). company_evidence: "domain", "name" or "none"."""
+    """(score, reasons, points per component). company_evidence: "domain" (confirmed), "given domain"
+    (unconfirmed), "name" or "none"."""
     reasons: list[str] = []
     parts = {"role": 0, "seniority": 0, "name": 0, "profile": 0, "company": 0}
     title = lead.get("title") or ""
@@ -100,9 +111,8 @@ def score_parts(lead: dict, role: Optional[str], company_evidence: str) -> tuple
     else:
         reasons.append("no profile link")
 
-    parts["company"] = {"domain": 10, "name": 6}.get(company_evidence, 0)
-    if company_evidence == "domain":
-        reasons.append("company confirmed by domain")
+    parts["company"] = COMPANY_POINTS.get(company_evidence, 0)
+    reasons.append(COMPANY_REASONS.get(company_evidence, "company not confirmed"))
 
     return min(sum(parts.values()), 100), reasons, parts
 

@@ -93,6 +93,17 @@ def test_breakdown_adds_up_and_every_component_has_a_reason():
     assert "full name" in reasons and "no profile link" in reasons
 
 
+@pytest.mark.parametrize("evidence, points, reason", [
+    ("domain", 10, "company confirmed by domain"),
+    ("given domain", 6, "company matched by name (domain given but not confirmed)"),
+    ("name", 6, "company matched by name"),
+    ("none", 0, "company not confirmed")])
+def test_company_evidence_points_and_reason(evidence, points, reason):
+    _, reasons, parts = score_parts(_lead(), "BD", evidence)
+    assert parts["company"] == points and reason in reasons
+    assert (evidence == "domain") == ("company confirmed by domain" in reasons)
+
+
 @pytest.mark.parametrize("name, url, label", [
     ("Jane S***h", "https://acme.io", "Medium"),                       # masked, company site: capped
     ("Jane S***h", "", "Medium"),                                      # masked, no link: capped
@@ -175,6 +186,40 @@ async def test_router_merges_providers_and_keeps_the_better_record(settings):
     assert "email" not in res.leads[0]
     assert res.spent_usd == pytest.approx(0.02)
     assert [s.provider for s in res.steps] == ["apollo", "treg routed (domain) via prov"]
+
+
+APOLLO_JANE = {"people": [{"first_name": "Jane", "last_name_obfuscated": "S***h", "title": "Head of BD",
+                           "organization": {"name": "Acme"}}]}
+
+
+@pytest.mark.parametrize("verified, evidence, company_points", [(True, "domain", 10), (False, "given domain", 6)])
+@respx.mock
+async def test_router_claims_domain_evidence_only_for_a_confirmed_domain(settings, verified, evidence,
+                                                                          company_points):
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json=APOLLO_JANE))
+    respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": []}}))
+    res = await find_leads(dataclasses.replace(settings, min_leads_before_paid=1), "Acme", "BD",
+                           _resolved(verified=verified), "t6")
+    lead = res.leads[0]
+    assert lead["_signals"]["evidence"] == evidence
+    assert lead["score_breakdown"]["company"] == company_points
+    assert ("company confirmed by domain" in lead["match_reasons"]) == verified
+    # Verification agrees: the employer is only confirmed by a confirmed domain; Apollo still implies current.
+    v = verify_lead(lead, "acme.io", verified)
+    assert v["checks"]["company"] == verified and v["checks"]["current"] is True
+    assert ("employer confirmed by domain" in v["notes"]) == verified
+
+
+@respx.mock
+async def test_router_unconfirmed_domain_routed_search_is_not_domain_evidence(settings):
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": []}))
+    respx.post(ROUTED_URL).mock(side_effect=[
+        httpx.Response(200, json={"output": {"people": [{"name": "Max Mustermann", "title": "Head of BD",
+                                                          "company": "Acme"}]}}),
+        httpx.Response(200, json={"output": {"people": []}})])
+    res = await find_leads(settings, "Acme", "BD", _resolved(verified=False), "t7")
+    assert [lead["_signals"]["evidence"] for lead in res.leads] == ["given domain"]
+    assert "company confirmed by domain" not in res.leads[0]["match_reasons"]
 
 
 @respx.mock

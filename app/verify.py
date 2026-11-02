@@ -44,7 +44,9 @@ def verify_lead(lead: dict, resolved_domain: Optional[str], verified_domain: boo
     company = (s.get("evidence") == "domain" and verified_domain) or (
         bool(org_domain) and bool(resolved_domain) and org_domain == normalize_domain(resolved_domain))
     current = s.get("current")
-    if current is None and any(p.startswith(_CURRENT_BY_SEARCH) for p in providers) and s.get("evidence") == "domain":
+    # Apollo's domain search returns only current staff, whether or not we could confirm the domain.
+    if current is None and any(p.startswith(_CURRENT_BY_SEARCH) for p in providers) and s.get("evidence") in (
+            "domain", "given domain"):
         current = True
     age = _age_days(s.get("refreshed_at"), now)
     fresh = None if age is None else age <= FRESH_DAYS

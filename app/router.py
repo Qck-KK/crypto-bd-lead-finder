@@ -114,6 +114,9 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
     def enough() -> bool:
         return pool.count(settings.min_lead_score) >= settings.min_leads_before_paid
 
+    # "domain" only when the provider confirmed the domain belongs to this company (BL-04).
+    domain_evidence = "domain" if resolved.verified else "given domain"
+
     if resolved.domain:
         step = SearchStep("apollo", resolved.domain)
         try:
@@ -121,7 +124,7 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
                                         titles=role_terms(role) or None, per_page=FETCH_ROWS, job_tag=f"{tag}-ap",
                                         base_url=settings.treg_base_url, timeout_s=settings.treg_timeout_s)
             step.rows, step.cost_usd = len(found.people), found.cost_usd or 0.0
-            step.kept = pool.add(found.people, found.served_by, resolved.domain, "domain")
+            step.kept = pool.add(found.people, found.served_by, resolved.domain, domain_evidence)
             succeeded = True
         except TregError as e:
             step.error = str(e)
@@ -151,7 +154,7 @@ async def find_leads(settings: Settings, company: str, role: Optional[str], reso
             step.rows, step.cost_usd = len(found.people), found.cost_usd or 0.0
             result.spent_usd += step.cost_usd
             step.provider = f"treg routed ({mode}) via {found.served_by or '?'}"
-            step.kept = pool.add(found.people, found.served_by, domain, "domain" if domain else "name")
+            step.kept = pool.add(found.people, found.served_by, domain, domain_evidence if domain else "name")
             succeeded = True
         except TregError as e:
             step.error = str(e)

@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Iteration 5 — BL-04: "confirmed by domain" only for a confirmed domain (2026-11-02)
+- Leads found by searching a domain the data provider could not confirm now carry evidence `given domain`:
+  6 company points (as for a name match) instead of 10, and the reason "company matched by name (domain given
+  but not confirmed)" instead of "company confirmed by domain". Leads from a confirmed domain are unchanged.
+- Every lead now has a company-evidence reason (also "company matched by name" / "company not confirmed").
+- Apollo's domain search still counts as "current role" for an unconfirmed domain (it only returns current
+  staff); the employment check's "employer confirmed" still requires a confirmed domain, as before.
+
 ### Iteration 4 — BL-09: recovery never resubmits a result in flight (2026-11-02)
 - After a restart, a running job whose payment's `NextAction.requestedAction` is `SubmitResultRequested` or
   `SubmitResultInitiated` is treated as submitted (as `ResultSubmitted` already was): it is marked completed
