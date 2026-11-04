@@ -74,6 +74,9 @@ class Settings:
     max_awaiting_payment: int = 30
     # Header whose first entry identifies the client behind a proxy (e.g. X-Forwarded-For); empty = peer address.
     rate_limit_client_header: str = ""
+    # FastAPI's /docs, /redoc, /openapi.json and /docs/oauth2-redirect (BL-17). Off unless API_DOCS_ENABLED=true:
+    # MIP-003 needs none of them and Swagger UI loads its scripts from a CDN.
+    api_docs_enabled: bool = False
 
     @property
     def is_pro(self) -> bool:
@@ -127,4 +130,5 @@ class Settings:
             start_job_per_hour=_int("START_JOB_PER_HOUR", 30),
             max_awaiting_payment=_int("MAX_AWAITING_PAYMENT", 30),
             rate_limit_client_header=os.getenv("RATE_LIMIT_CLIENT_HEADER", "").strip(),
+            api_docs_enabled=_bool("API_DOCS_ENABLED"),
         )

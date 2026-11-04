@@ -315,7 +315,7 @@ async def test_recovery_does_not_resubmit_a_result_in_flight(env, payment_mock, 
     payment_mock["record"] = {"onChainState": on_chain, "NextAction": {"requestedAction": action}}
     counts = await recover_jobs(_server(storage))
     job = await storage.get_job("j1")
-    assert counts == {"resumed": 0, "expired": 0, "completed": 1, "refunded": 0}
+    assert counts == {"resumed": 0, "expired": 0, "completed": 1, "refunded": 0, "reconcile": 0, "errors": 0}
     assert job["status"] == "completed" and job["result"] == "THE RESULT"
     assert payment_mock["submitted"] is None and "pay-j1" not in payment_mock["callbacks"]
 

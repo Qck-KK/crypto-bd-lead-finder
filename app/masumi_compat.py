@@ -9,6 +9,7 @@ Configure with PAYMENT_SOURCE_TYPE (default Web3CardanoV2; Web3CardanoV1 restore
 and PAYMENT_SOURCE_INDEX (default 0, the first entry of supportedPaymentSources at registration).
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -18,6 +19,10 @@ from typing import Any, Dict, Optional
 import aiohttp
 import masumi.server
 from masumi import Payment
+
+from .errors import PaymentServiceError, PaymentServiceUnavailable
+from .identifiers import validate_purchaser_identifier
+from .logs import sanitize
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +38,9 @@ class V2Payment(Payment):
         self.source_index = int(os.getenv("PAYMENT_SOURCE_INDEX", "0"))
 
     def build_payload(self, metadata: Optional[str] = None) -> Dict[str, Any]:
+        # Same check as the /start_job middleware, for any other caller (BL-16): never send an identifier the
+        # Payment Service would refuse.
+        validate_purchaser_identifier(self.identifier_from_purchaser)
         now = datetime.now(timezone.utc)
         payload: Dict[str, Any] = {
             "agentIdentifier": self.agent_identifier,
@@ -52,24 +60,62 @@ class V2Payment(Payment):
         return payload
 
     async def create_payment_request(self, metadata: Optional[str] = None) -> Dict[str, Any]:
+        """POST /payment. Raises PaymentServiceUnavailable (unreachable, timeout, 429, 5xx) or PaymentServiceError
+        (any other refusal, or an answer without the fields the SDK reads). Exception messages never carry the
+        Payment Service's text; it is logged only sanitized and cut short (BL-16)."""
         payload = self.build_payload(metadata)
-        async with aiohttp.ClientSession() as session:
-            async with session.post(f"{self.config.payment_service_url}/payment/", headers=self._headers,
-                                    json=payload) as response:
-                text = await response.text()
-                if response.status == 401:
-                    raise ValueError("Unauthorized: Invalid API key")
-                if response.status == 400:
-                    raise ValueError(f"Bad request: {text}")
-                if response.status != 200:
-                    raise Exception(f"Payment request failed ({response.status}): {text[:500]}")
-                result = json.loads(text)
-        data = result["data"]
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(f"{self.config.payment_service_url}/payment/", headers=self._headers,
+                                        json=payload) as response:
+                    status = response.status
+                    text = await response.text()
+        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as e:
+            logger.warning("Payment Service unreachable: %s", type(e).__name__)
+            raise PaymentServiceUnavailable(f"Payment Service unreachable ({type(e).__name__})") from None
+        if status != 200:
+            logger.warning("Payment Service refused the payment request: HTTP %d: %s", status, self._log_text(text))
+            if status == 429 or status >= 500:
+                raise PaymentServiceUnavailable(f"Payment Service answered HTTP {status}")
+            raise PaymentServiceError(f"Payment Service refused the payment request (HTTP {status})")
+        try:
+            result = json.loads(text)
+        except ValueError:
+            logger.warning("Payment Service answered 200 without JSON: %s", self._log_text(text))
+            raise PaymentServiceError("Payment Service answer is not JSON") from None
+        data = result.get("data") if isinstance(result, dict) else None
+        problem = _payment_data_problem(data)
+        if problem:
+            logger.warning("Payment Service answer unusable (%s): %s", problem, self._log_text(text))
+            raise PaymentServiceError(f"Payment Service answer unusable: {problem}")
         self.payment_ids.add(data["blockchainIdentifier"])
-        result["time_values"] = {k: data[k] for k in ("payByTime", "submitResultTime", "unlockTime",
-                                                      "externalDisputeUnlockTime")}
+        result["time_values"] = {k: data[k] for k in _TIME_FIELDS}
         logger.info("Payment request created: %s...", data["blockchainIdentifier"][:12])
         return result
+
+    def _log_text(self, text: str) -> str:
+        return sanitize(text, 200, secrets=(self.config.payment_api_key or "",))
+
+
+_TIME_FIELDS = ("payByTime", "submitResultTime", "unlockTime", "externalDisputeUnlockTime")
+
+
+def _payment_data_problem(data: Any) -> Optional[str]:
+    """What the SDK's start_job would trip over in `data` (it reads these fields and calls int() on the times)."""
+    if not isinstance(data, dict):
+        return "no data object"
+    ident = data.get("blockchainIdentifier")
+    if not isinstance(ident, str) or not ident:
+        return "no blockchainIdentifier"
+    for key in _TIME_FIELDS:
+        value = data.get(key)
+        if isinstance(value, bool):
+            return f"{key} is not an integer"
+        try:
+            int(value)
+        except (TypeError, ValueError):
+            return f"{key} is not an integer"
+    return None
 
 
 def install() -> None:

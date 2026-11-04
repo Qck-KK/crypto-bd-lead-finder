@@ -236,5 +236,5 @@ async def test_a_paid_job_without_budget_fails_once_submits_nothing_and_is_not_r
     assert attempt["reserved_usd"] == 0 and attempt["status"] == "settled"
 
     for _ in range(2):  # restarts: a failed job is neither re-run nor resubmitted
-        assert await recover_jobs(_server(storage)) == {"resumed": 0, "expired": 0, "completed": 0, "refunded": 0}
+        assert await recover_jobs(_server(storage)) == {"resumed": 0, "expired": 0, "completed": 0, "refunded": 0, "reconcile": 0, "errors": 0}
     assert (await storage.get_job(job_id))["status"] == "failed" and len(_fresh_ledger.attempts) == 1

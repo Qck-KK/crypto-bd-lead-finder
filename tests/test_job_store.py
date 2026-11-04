@@ -66,7 +66,7 @@ async def test_restart_resumes_running_job_and_expires_stale_ones(env, payment_m
     # "Restart": a fresh server on the same storage.
     server = _server(storage)
     counts = await recover_jobs(server, now=now)
-    assert counts == {"resumed": 2, "expired": 1, "completed": 0, "refunded": 0}
+    assert counts == {"resumed": 2, "expired": 1, "completed": 0, "refunded": 0, "reconcile": 0, "errors": 0}
     assert (await storage.get_job("stale-1"))["status"] == "failed"
     assert (await storage.get_job("done-1"))["result"] == "old"
     assert not treg.called  # nothing runs before escrow is confirmed again
@@ -86,7 +86,7 @@ async def test_recovery_ignores_jobs_without_payment_id(env, payment_mock):
     storage = InMemoryJobStorage()
     await storage.create_job("x", _job("x", "running", None, None, payment_id=None))
     counts = await recover_jobs(_server(storage))
-    assert counts == {"resumed": 0, "expired": 1, "completed": 0, "refunded": 0}
+    assert counts == {"resumed": 0, "expired": 1, "completed": 0, "refunded": 0, "reconcile": 0, "errors": 0}
 
 
 class _FakePgStorage(PostgresJobStorage):

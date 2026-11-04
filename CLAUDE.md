@@ -39,8 +39,12 @@ Two registered agents from one codebase: standard and Pro (`AGENT_TIER=pro`). Cu
 
 ## Deploying (InstaBox)
 
-- SSH certificates last **1 hour**. If SSH says `Permission denied (publickey)`, ask the owner to run
-  `npx instabox@latest ssh m_agqzoe52hlullr222yb5ovrswm` on this machine, then batch the server work.
+- **Connect only through the InstaBox CLI** (owner's rule): `npx instabox@latest ssh finder-agent` for a session,
+  `npx instabox@latest ssh finder-agent -- "<command>"` for one command (stdin is passed through byte-exact, so
+  `git archive ... | npx instabox@latest ssh finder-agent -- "tar -x -C ..."` works). The CLI handles
+  authentication and issues a fresh certificate when the old one expired; retry through the CLI. Never call
+  `ssh`/`scp` with the cached certificate files, never reuse a stale session, never edit SSH configuration or
+  bypass authentication.
 - Server repo: `/data/workspace/crypto-bd-lead-finder`, compose in `deploy/`.
 - Docker Hub rate-limits base image pulls; for code-only changes layer onto the built image:
   `printf "FROM deploy-agent:latest\nCOPY app ./app\nCOPY scripts ./scripts\nCOPY main.py .\n" > /tmp/Dockerfile.codeonly`,

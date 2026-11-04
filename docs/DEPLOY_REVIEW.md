@@ -71,7 +71,8 @@ certificate.
 ## Pre-deploy checks (read only)
 
 ```bash
-D=/c/Users/zhang/.config/instabox/ssh; M=m_agqzoe52hlullr222yb5ovrswm; S="ssh -p 2222 -i $D/id_ed25519 -o CertificateFile=$D/$M-cert.pub -o UserKnownHostsFile=$D/known_hosts -o IdentitiesOnly=yes $M@ssh.instabox.sh"
+# Always through the InstaBox CLI: it handles authentication and refreshes an expired certificate.
+S="npx --yes instabox@latest ssh finder-agent --"
 ```
 1. **Jobs in progress per agent** (read-only transaction):
    ```bash
@@ -103,8 +104,10 @@ D=/c/Users/zhang/.config/instabox/ssh; M=m_agqzoe52hlullr222yb5ovrswm; S="ssh -p
    ```
 2. **Upload exactly the commit being deployed** (app code only; `deploy/` already matches `e3e6749`):
    ```bash
-   git archive --format=tar HEAD app scripts main.py | $S "tar -x -C /data/workspace/crypto-bd-lead-finder && echo $(git rev-parse HEAD) > /data/workspace/crypto-bd-lead-finder/DEPLOYED_COMMIT"
+   C=$(git rev-parse HEAD)   # pin once: the same commit goes into the archive and DEPLOYED_COMMIT
+   git -c core.autocrlf=false -c core.eol=lf archive --format=tar $C app scripts main.py | $S "tar -x -C /data/workspace/crypto-bd-lead-finder && echo $C > /data/workspace/crypto-bd-lead-finder/DEPLOYED_COMMIT"
    ```
+   Plain `git archive` on this Windows checkout (autocrlf) would ship CRLF files.
 3. **Code-only image and both agents together** (from `CLAUDE.md`):
    ```bash
    $S 'cd /data/workspace/crypto-bd-lead-finder && printf "FROM deploy-agent:latest\nCOPY app ./app\nCOPY scripts ./scripts\nCOPY main.py .\n" > /tmp/Dockerfile.codeonly && DOCKER_BUILDKIT=0 docker build -q -f /tmp/Dockerfile.codeonly -t deploy-agent:latest . && cd deploy && docker compose up -d --no-build --no-deps --force-recreate agent agent-pro'
@@ -131,8 +134,10 @@ D=/c/Users/zhang/.config/instabox/ssh; M=m_agqzoe52hlullr222yb5ovrswm; S="ssh -p
 4. `scripts/ledger_rollback_prep.py --apply`.
 5. Redeploy the previous commit with the same steps.
 
-Step 0 kept the previous image. Rolling it back: `docker tag deploy-agent:a97ca3e deploy-agent:latest`,
-re-upload `git archive a97ca3e app scripts main.py`, then recreate both agents.
+Step 0 kept the previous image. Rolling it back takes image and source together (see `docs/DEPLOY_HARDENING.md`
+for the full commands): `docker tag deploy-agent:a97ca3e deploy-agent:latest`, then recreate both agents (a tag
+alone does not change running containers), and restore the source tree: delete the files the newer commit added,
+re-upload the old commit with the LF archive command above and write it to `DEPLOYED_COMMIT`.
 
 ## Decisions for the owner before deploying
 

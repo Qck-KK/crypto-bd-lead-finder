@@ -23,6 +23,7 @@ from masumi import Config  # noqa: E402
 from app.agent import input_schema, process_job  # noqa: E402
 from app import feedback, ledger, masumi_compat  # noqa: E402
 from app.job_store import PostgresJobStorage, recover_jobs  # noqa: E402
+from app.errors import install_error_handling  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
 from app.report import FOOTER  # noqa: E402
 from app.job_gate import StartJobGate, add_job_gate  # noqa: E402
@@ -45,6 +46,14 @@ DEMO = {
         )
     },
 }
+
+
+def remove_api_docs(app) -> None:
+    """Take out FastAPI's documentation routes (BL-17). The SDK creates the app, and FastAPI registers them in its
+    constructor, so they are removed from the router; the URLs are cleared so nothing re-adds or links them."""
+    docs_paths = {app.openapi_url, app.docs_url, app.redoc_url, app.swagger_ui_oauth2_redirect_url} - {None}
+    app.router.routes[:] = [r for r in app.router.routes if getattr(r, "path", None) not in docs_paths]
+    app.openapi_url = app.docs_url = app.redoc_url = app.swagger_ui_oauth2_redirect_url = None
 
 
 def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=None):
@@ -97,6 +106,9 @@ def create_app(job_storage=None, feedback_store=None, job_ledger=None, health=No
     gate = StartJobGate(settings, blocked, server)
     add_admin_routes(app, server, settings, admin_token, gate)
     add_job_gate(app, gate)
+    install_error_handling(app)  # last: its identifier check must run before the gate
+    if not settings.api_docs_enabled:
+        remove_api_docs(app)
     if not settings.feedback_secret:
         logging.getLogger(__name__).warning("FEEDBACK_SECRET not set: reports carry no feedback link")
 
