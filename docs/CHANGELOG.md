@@ -32,8 +32,8 @@
   - at most 30 orders awaiting payment (429).
   - The client is the peer address unless `RATE_LIMIT_CLIENT_HEADER` names a trusted proxy header.
 - `/admin/stats` → `start_job_gate`, `/metrics` → `bdlf_start_job_total{result=…}`.
-- `docs/DEPLOY_REVIEW.md`: behaviour changes, migration (tested in place on an `a97ca3e` database), env vars,
-  read-only pre-deploy checks, deploy, verification and rollback steps.
+- Deployment review (internal document, not in this repository): behaviour changes, migration (tested in
+  place on an `a97ca3e` database), env vars, read-only pre-deploy checks, deploy, verification and rollback steps.
 
 ### Iteration 10 — BL-34 to BL-37: attempt-level spend holds, midnight-safe expiry, order identity (2026-11-02)
 - Every run of a job (attempt) has its own spend reservation (`spend_attempts`). A retry gets a new one, and

@@ -12,7 +12,7 @@ path changes. In order:
    is the Payment Service's (`payByTime` of the payment request, stored by the SDK as the job's `pay_by_time`);
    an order without a readable one counts (fail closed). Expired unpaid orders do not count: masumi 1.2.0 never
    expires them while it runs (only `recover_jobs` does, at startup), so counting them would block sales until a
-   restart (DEPLOY_PREFLIGHT B1). Requests admitted but still being created by the SDK count too, under a lock,
+   restart (preflight finding B1). Requests admitted but still being created by the SDK count too, under a lock,
    so concurrent requests cannot overshoot the limit.
 4. Daily budget (BL-33): refused while what is left of today's shared cap (settled spend + open holds, all agents)
    is below one job's worst-case spend, or when the ledger cannot be read. This is a check, not a reservation:

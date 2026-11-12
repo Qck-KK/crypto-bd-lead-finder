@@ -27,18 +27,97 @@ draft, and search notes. Each lead has exactly these fields:
 
 The report ends with the data source and the B2B-only notice. It never contains our costs.
 
-## Reliability
+### Sample output
 
-| Area | What happens |
-|---|---|
-| Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. The compose `backup` service runs `deploy/backup.sh` on start and every 24 h: both databases, 7 dumps each, in `BACKUP_HOST_DIR` (default `/data/workspace/backups`). Copy them off the server; the Payment Service dump holds wallet keys encrypted with `ENCRYPTION_KEY`, so never store it next to the key. |
-| Idempotency | The result is stored under the job tag (agent, tier, the order's payment id, purchaser identifier, input) before the SDK submits it on-chain. A re-run of the same order returns it unchanged: same on-chain hash, no provider paid twice. Two orders never share a result, also not a Standard and a Pro order with the same identifier and input. treg calls carry idempotency keys derived from the job tag and the request body. |
-| Recovery | On start: jobs awaiting payment get monitoring back; running jobs whose result is already on-chain, or whose submission the Payment Service is already processing (`NextAction` `SubmitResultRequested`/`Initiated`), are marked completed from the stored result (never resubmitted); refunded ones fail; locked ones run again. |
-| Payment acceptance | Work starts only on `FundsLocked`, which the Payment Service sets only after matching the on-chain escrow against the requested amount and token (else `FundsOrDatumInvalid`). Before any work the record is checked against this job: same payment id, this agent, this input hash (all must be present), expected token, at least the registered price. Otherwise the job fails and nothing is delivered. If the status cannot be read (3 tries), the job fails closed. |
-| Spend control | `DAILY_SPEND_CAP_USD` (default 1.0) caps treg spend per UTC day across all agents on the database (one treg balance). Each job reserves its worst case (domain probes and Apollo search at $0.01 each, `TREG_JOB_BUDGET_USD`, Pro `ENRICH_BUDGET_USD`) before its first call; concurrent jobs and both agents share the cap through that reservation. Every run of a job (attempt) has its own reservation; every treg call, including the free Apollo ones, must fit in it, is written to the ledger before it is sent, and its cost is deducted. A missing or invalid cost header counts as the call's max cost (floored to the 4 decimals sent). An unsettled reservation (crash, retry, a run across UTC midnight) keeps counting until the end of the UTC day containing its start + `ATTEMPT_TIMEOUT_S`; a retry never releases it. If the ledger cannot be read, or the cap is used up, no treg call is made and the job fails (refundable). The cap holds on our accounting; that it is a hard bound also depends on treg never charging more than the max cost sent, which is not yet confirmed for the direct Apollo endpoints. |
-| Admission | Before a payment request is created, `/start_job` is refused (and `/availability` reports unavailable) while today's shared data budget cannot cover one more job (503 until 00:00 UTC). It is also refused above 30 orders per client or 30 per agent per hour, or with 30 orders awaiting payment whose pay-by time has not passed (429, `START_JOB_PER_CLIENT_PER_HOUR`, `START_JOB_PER_HOUR`, `MAX_AWAITING_PAYMENT`). Behind the InstaBox proxy every request comes from one address, so per-client equals the total for now; that setting has not yet been checked against real `/start_job` traffic. A paid job that does not get its whole worst-case budget at execution (the cap ran out after `/start_job`, or the ledger is unreadable) is not run: no treg call, no result submitted, the job fails and the payment stays refundable. |
-| Monitoring | `/availability` reports `unavailable` when the Payment Service or database is down (the registry then hides the agent). `/admin/stats` (JSON, ledger per agent) and `/metrics` (Prometheus text) need `x-admin-token`. Logs carry the job tag, `LOG_FORMAT=json` is available, and SDK lines with results or inputs are redacted. |
-| Launch checks | `scripts/preflight.py` (read-only, `--target Mainnet` for a readiness review), `scripts/acceptance.py` (paid end-to-end test, Preprod only), `MAINNET_CHECKLIST.md`. |
+**Example data: the company, the people and the links below are fictional.** This is the report format the
+agent produces (`app/report.py`), shortened to 2 of up to 10 leads. The JSON block that follows the report is
+left out.
+
+```markdown
+# BD leads: partnerships at Northwind Protocol
+
+- **Company domain:** northwind.example (confirmed)
+- **Leads delivered:** 2 (High 1 · Medium 1 · Low 0)
+- **Identifiable:** 1 of 2 with a full name · 1 of 2 with an individual LinkedIn profile
+- **Employment check:** 2 verified · 0 likely · 0 unverified (employer, current role, data freshness)
+- **Rate these leads:** [feedback form](https://<agent-url>/feedback?ref=…&t=…)
+
+## Overview
+
+| # | Name | Title | Quality | Employment | Profile |
+|---|---|---|---|---|---|
+| 1 | Maya Lindqvist | Head of Partnerships | High 100 | Verified | [LinkedIn](https://www.linkedin.com/in/maya-lindqvist-example) |
+| 2 | Tomas R***o | Senior Partnerships Manager, EMEA | Medium 73 | Verified | company site only: [northwind.example](https://northwind.example) |
+
+## How to use these leads
+
+- Names with `***` are partly masked by the data provider. Search LinkedIn for the first name, title and company to find the person.
+- *Company site only* means the data has no individual profile for that person; the link goes to the company's website, not to the person.
+- Check the person's current role before you reach out; public data can be out of date.
+- The drafts are starting points: add one specific, verifiable reason for contacting this person.
+- Use these contacts for professional B2B outreach only, and honour opt-out requests.
+
+## Leads
+
+### 1. Maya Lindqvist
+- **Title:** Head of Partnerships
+- **Company:** Northwind Protocol
+- **Profile:** [LinkedIn](https://www.linkedin.com/in/maya-lindqvist-example)
+- **Quality:** 100/100 (High): title matches 'partnerships'; senior role; full name; LinkedIn profile; company confirmed by domain
+- **Points:** role 35 · seniority 20 · name 15 · profile 20 · company 10 · employment check +5
+- **Employment check:** Verified (employer confirmed by domain; current role per provider; record refreshed 21 days ago)
+- **Source:** treg.to (apollo)
+
+**Email subject:** Northwind Protocol x NodeMetrics
+
+> Hi Maya, I came across your work as Head of Partnerships at Northwind Protocol. I'm reaching out about a cross-chain analytics dashboard for node operators. Would you be open to a 15-minute call in the next couple of weeks to see if there's a fit?
+>
+> Best,
+> Alex Kim, NodeMetrics
+
+**LinkedIn note:** Hi Maya, I work on a cross-chain analytics dashboard for node operators and would value connecting with you as Head of Partnerships at Northwind Protocol.
+
+### 2. Tomas R***o
+- **Title:** Senior Partnerships Manager, EMEA
+- **Company:** Northwind Protocol
+- **Profile:** company site only: [northwind.example](https://northwind.example)
+- **Quality:** 73/100 (Medium): title matches 'partnerships'; last name masked by the provider; no individual profile (company website only); company confirmed by domain; rated at most Medium: masked name and no individual profile
+- **Points:** role 35 · seniority 12 · name 5 · profile 6 · company 10 · employment check +5
+- **Employment check:** Verified (employer confirmed by domain; current role per provider; record refreshed 64 days ago)
+- **Source:** treg.to (apollo)
+
+(email subject, email draft and LinkedIn note as for lead 1)
+
+## Search notes
+
+- apollo on northwind.example: 14 found, 2 kept
+
+## Feedback
+
+Tell us which leads were useful: [rate this delivery](https://<agent-url>/feedback?ref=…&t=…). People you mark as gone or wrong are never delivered again.
+
+---
+Data source: treg.to. For B2B professional outreach only.
+```
+
+The drafts above are the built-in template; normally Gemini writes a draft tailored to each person, and the
+template is used when it fails or times out.
+
+
+## Guarantees
+
+- **Payment before work.** A job starts only after the buyer's payment is locked in on-chain escrow and matches
+  this job (agent, input, token, price). If that cannot be checked, the job does not run.
+- **Same order, same result, charged once.** Re-running an order returns the stored result with the same on-chain
+  hash, and no data provider is paid twice.
+- **Daily spend cap.** Spending on data is capped per day across both agents; a job that cannot get its full
+  budget is not run and stays refundable.
+- **Recovery after a crash.** Jobs live in PostgreSQL. After a restart, paid jobs are finished and results
+  already submitted are never submitted again.
+- **No personal contact data.** Personal emails, phone numbers and addresses are never delivered, even when the
+  data provider returns them.
+
+Details: [Reliability in detail](#reliability-in-detail).
 
 ## Tiers, outreach, verification and feedback
 
@@ -129,6 +208,27 @@ misses at some providers are billed too.
 call whose reservation would exceed it (treg docs). Change the inputs with `COST_TREG_PER_ROW_USD`, `COST_LLM_PER_JOB_USD`, `PRICE_MARKUP`, or set
 `PRICE_TUSDM` directly. The price is fixed on-chain at registration;
 `python scripts/registration_values.py` prints it in the atomic units the registration form needs.
+
+## How it was built
+
+The first version was audited before any further feature work: the audit logged issues under the ids BL-01 to
+BL-37 (payment checks, spend control, recovery, lead quality, security). They were then worked through one at a
+time, highest risk first, and each fix came with tests. The suite now has 381 tests (`python -m pytest -q`; 14 of
+them need a local PostgreSQL and are skipped without one), with every external API mocked.
+[docs/CHANGELOG.md](docs/CHANGELOG.md) records each round; the `BL-` ids in code comments refer to these issues.
+
+## Reliability in detail
+
+| Area | What happens |
+|---|---|
+| Persistence | Jobs (`agent_jobs`, `agent_jobs_pro`), results, cost ledger and feedback live in PostgreSQL. The compose `backup` service runs `deploy/backup.sh` on start and every 24 h: both databases, 7 dumps each, in `BACKUP_HOST_DIR` (default `/data/workspace/backups`). Copy them off the server; the Payment Service dump holds wallet keys encrypted with `ENCRYPTION_KEY`, so never store it next to the key. |
+| Idempotency | The result is stored under the job tag (agent, tier, the order's payment id, purchaser identifier, input) before the SDK submits it on-chain. A re-run of the same order returns it unchanged: same on-chain hash, no provider paid twice. Two orders never share a result, also not a Standard and a Pro order with the same identifier and input. treg calls carry idempotency keys derived from the job tag and the request body. |
+| Recovery | On start: jobs awaiting payment get monitoring back; running jobs whose result is already on-chain, or whose submission the Payment Service is already processing (`NextAction` `SubmitResultRequested`/`Initiated`), are marked completed from the stored result (never resubmitted); refunded ones fail; locked ones run again. |
+| Payment acceptance | Work starts only on `FundsLocked`, which the Payment Service sets only after matching the on-chain escrow against the requested amount and token (else `FundsOrDatumInvalid`). Before any work the record is checked against this job: same payment id, this agent, this input hash (all must be present), expected token, at least the registered price. Otherwise the job fails and nothing is delivered. If the status cannot be read (3 tries), the job fails closed. |
+| Spend control | `DAILY_SPEND_CAP_USD` (default 1.0) caps treg spend per UTC day across all agents on the database (one treg balance). Each job reserves its worst case (domain probes and Apollo search at $0.01 each, `TREG_JOB_BUDGET_USD`, Pro `ENRICH_BUDGET_USD`) before its first call; concurrent jobs and both agents share the cap through that reservation. Every run of a job (attempt) has its own reservation; every treg call, including the free Apollo ones, must fit in it, is written to the ledger before it is sent, and its cost is deducted. A missing or invalid cost header counts as the call's max cost (floored to the 4 decimals sent). An unsettled reservation (crash, retry, a run across UTC midnight) keeps counting until the end of the UTC day containing its start + `ATTEMPT_TIMEOUT_S`; a retry never releases it. If the ledger cannot be read, or the cap is used up, no treg call is made and the job fails (refundable). The cap holds on our accounting; that it is a hard bound also depends on treg never charging more than the max cost sent, which is not yet confirmed for the direct Apollo endpoints. |
+| Admission | Before a payment request is created, `/start_job` is refused (and `/availability` reports unavailable) while today's shared data budget cannot cover one more job (503 until 00:00 UTC). It is also refused above 30 orders per client or 30 per agent per hour, or with 30 orders awaiting payment whose pay-by time has not passed (429, `START_JOB_PER_CLIENT_PER_HOUR`, `START_JOB_PER_HOUR`, `MAX_AWAITING_PAYMENT`). Behind the InstaBox proxy every request comes from one address, so per-client equals the total for now; that setting has not yet been checked against real `/start_job` traffic. A paid job that does not get its whole worst-case budget at execution (the cap ran out after `/start_job`, or the ledger is unreadable) is not run: no treg call, no result submitted, the job fails and the payment stays refundable. |
+| Monitoring | `/availability` reports `unavailable` when the Payment Service or database is down (the registry then hides the agent). `/admin/stats` (JSON, ledger per agent) and `/metrics` (Prometheus text) need `x-admin-token`. Logs carry the job tag, `LOG_FORMAT=json` is available, and SDK lines with results or inputs are redacted. |
+| Launch checks | `scripts/preflight.py` (read-only, `--target Mainnet` for a readiness review), `scripts/acceptance.py` (paid end-to-end test, Preprod only), `MAINNET_CHECKLIST.md`. |
 
 ## Run locally
 
