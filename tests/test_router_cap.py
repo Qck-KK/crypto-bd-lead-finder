@@ -92,3 +92,45 @@ def test_filter_people_default_limit_unchanged_and_none_keeps_all():
     rows = [_row(i, "Head of BD") for i in range(25)]
     assert len(filter_people(rows, provider="x", company="Acme", company_domain="acme.io")) == 10
     assert len(filter_people(rows, provider="x", company="Acme", company_domain="acme.io", limit=None)) == 25
+
+
+# --- person identity: full names compared in full (Wei Zhang is not Wei Zheng) ---------------------------------
+
+def test_same_person_compares_full_names_in_full_and_masked_names_coarsely():
+    from app.router import full_name_key, person_full_hash, person_key, same_person
+
+    def lead(name):
+        return {"name": name, "company": "Acme Labs"}
+
+    assert person_key(lead("Wei Zhang")) == person_key(lead("Wei Zheng"))  # the coarse key collides...
+    assert not same_person(lead("Wei Zhang"), lead("Wei Zheng"))           # ...full names do not
+    assert not same_person(lead("Li Wang"), lead("Li Wong"))
+    assert same_person(lead("Wei Z***g"), lead("Wei Zhang")) and same_person(lead("Wei Zheng"), lead("Wei Z***g"))
+    assert same_person(lead("Wei Zhang"), lead("wei  zhang"))
+    assert full_name_key(lead("Wei Z***g")) is None and person_full_hash(lead("Wei Z***g")) is None
+    assert person_full_hash(lead("Wei Zhang")) != person_full_hash(lead("Wei Zheng"))
+
+
+@respx.mock
+async def test_pool_keeps_two_people_whose_coarse_keys_collide(settings):
+    rows = [{"first_name": "Wei", "last_name": "Zhang", "title": "Head of BD", "organization": {"name": "Acme"}},
+            {"first_name": "Wei", "last_name": "Zheng", "title": "BD Manager", "organization": {"name": "Acme"}},
+            {"first_name": "Li", "last_name": "Wang", "title": "VP Partnerships", "organization": {"name": "Acme"}},
+            {"first_name": "Li", "last_name": "Wong", "title": "BD Lead", "organization": {"name": "Acme"}}]
+    _mock(rows)
+    res = await find_leads(dataclasses.replace(settings, min_leads_before_paid=1), "Acme", "BD", _resolved(), "c6")
+    assert sorted(lead["name"] for lead in res.leads) == ["Li Wang", "Li Wong", "Wei Zhang", "Wei Zheng"]
+
+
+@respx.mock
+async def test_pool_still_merges_a_masked_name_into_the_full_one(settings):
+    respx.post(APOLLO_URL).mock(return_value=httpx.Response(200, json={"people": [
+        {"first_name": "Wei", "last_name_obfuscated": "Z***g", "title": "Head of BD", "organization": {"name": "Acme"}},
+    ]}))
+    respx.post(ROUTED_URL).mock(return_value=httpx.Response(200, json={"output": {"people": [
+        {"name": "Wei Zhang", "title": "Head of BD", "company": "Acme"},
+        {"name": "Wei Zheng", "title": "Head of BD", "company": "Acme"}]}}))
+    res = await find_leads(settings, "Acme", "BD", _resolved(), "c7")
+    # The masked Apollo row is merged into the first full name it fits; Wei Zheng stays a person of their own.
+    assert sorted(lead["name"] for lead in res.leads) == ["Wei Zhang", "Wei Zheng"]
+    assert next(lead for lead in res.leads if lead["name"] == "Wei Zhang")["_signals"]["providers"] == ["?", "apollo"]

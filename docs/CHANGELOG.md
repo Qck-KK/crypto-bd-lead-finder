@@ -13,6 +13,9 @@
   `resolver.candidate_domains`.
 - Company matching: Labs, Foundation and Protocol still match the bare name but no longer each other
   ("Uniswap Labs" != "Uniswap Foundation"), both for domain confirmation and for which leads are kept.
+- Person identity: two leads that both have a full name are merged only if the full names match. The coarse key
+  (first name + first/last letter of the last name + company) is used only when one name is masked, so
+  Wei Zhang / Wei Zheng and Li Wang / Li Wong are no longer merged into one lead.
 
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not

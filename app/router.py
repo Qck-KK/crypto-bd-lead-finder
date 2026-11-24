@@ -60,8 +60,37 @@ def person_key(lead: dict) -> tuple:
 
 
 def person_hash(lead: dict) -> str:
-    """Stored instead of names (feedback suppression): one-way, not reversible to a name."""
+    """Stored instead of names (feedback suppression): one-way, not reversible to a name. Coarse (see
+    person_key): it is what a masked name can be compared by."""
     return hashlib.sha256("|".join(person_key(lead)).encode()).hexdigest()[:32]
+
+
+def full_name_key(lead: dict) -> Optional[tuple]:
+    """Whole name + company, or None when the name is masked by the provider ("S***h") or has no last name.
+
+    person_key alone confuses different people (Wei Zhang / Wei Zheng, Li Wang / Li Wong share it). Two leads
+    that both have a full name are the same person only if their full names match; person_key is used only when
+    one side is masked."""
+    if "*" in lead["name"]:
+        return None
+    parts = re.findall(r"\w+", lead["name"].lower())
+    if len(parts) < 2:
+        return None
+    return " ".join(parts), re.sub(r"[^a-z0-9]", "", lead["company"].lower())
+
+
+def person_full_hash(lead: dict) -> Optional[str]:
+    """One-way hash of full_name_key (None for masked names), stored next to person_hash."""
+    key = full_name_key(lead)
+    return hashlib.sha256(("full|" + "|".join(key)).encode()).hexdigest()[:32] if key else None
+
+
+def same_person(a: dict, b: dict) -> bool:
+    """Full names compared in full when both sides have one; otherwise the coarse person_key."""
+    if person_key(a) != person_key(b):
+        return False
+    fa, fb = full_name_key(a), full_name_key(b)
+    return fa is None or fb is None or fa == fb
 
 
 def public_view(lead: dict) -> dict:
@@ -72,8 +101,15 @@ def public_view(lead: dict) -> dict:
 class _Pool:
     def __init__(self, company: str, role: Optional[str], suppressed: frozenset = frozenset()):
         self.company, self.role, self.suppressed = company, role, suppressed
-        self.by_person: dict[tuple, dict] = {}
+        self.by_person: dict[int, dict] = {}  # one entry per person, in the order first found
+        self._by_coarse: dict[tuple, list[int]] = {}  # person_key -> entries sharing it (see same_person)
         self.suppressed_hits = 0
+
+    def _find(self, lead: dict) -> Optional[int]:
+        for i in self._by_coarse.get(person_key(lead), []):
+            if same_person(self.by_person[i], lead):
+                return i
+        return None
 
     def add(self, rows: list[dict], provider: str, domain: Optional[str], evidence: str) -> int:
         """Scores every row that passes the compliance filter. No truncation here: the per-job cap is applied in
@@ -89,8 +125,8 @@ class _Pool:
             signals = {**row_signals(row), "providers": [provider or "?"], "evidence": evidence}
             scored = {**lead, "_signals": signals}
             rate(scored, score, reasons, parts)
-            key = person_key(lead)
-            old = self.by_person.get(key)
+            key = self._find(lead)
+            old = self.by_person.get(key) if key is not None else None
             if old:
                 # Same person from another provider: keep the better record, remember every source.
                 providers = sorted(set(old["_signals"]["providers"]) | {provider or "?"})
@@ -99,7 +135,9 @@ class _Pool:
                 best["_signals"] = {**merged, "providers": providers}
                 self.by_person[key] = best
             else:
+                key = len(self.by_person)
                 self.by_person[key] = scored
+                self._by_coarse.setdefault(person_key(lead), []).append(key)
         return len(kept)
 
     def count(self, min_score: int) -> int:
