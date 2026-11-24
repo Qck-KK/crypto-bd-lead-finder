@@ -3,6 +3,7 @@
 import json
 
 import httpx
+import pytest
 import respx
 
 from app import drafts as drafts_module
@@ -26,8 +27,25 @@ def _extract_json(result):
 
 def test_guess_domains_tries_given_then_name_based():
     assert guess_domains("Chainlink Labs", "https://www.chain.link/x") == [
-        "chain.link", "chainlinklabs.com", "chainlink.com", "chainlinklabs.io", "chainlink.io"]
-    assert guess_domains("Uniswap")[:2] == ["uniswap.com", "uniswap.io"]
+        "chain.link", "chainlinklabs.com", "chainlink.com", "chainlink.org", "chainlink.io"]
+    assert guess_domains("Uniswap")[:3] == ["uniswap.com", "uniswap.org", "uniswap.io"]
+
+
+@pytest.mark.parametrize("company, expected", [
+    ("Uniswap Labs", "uniswap.org"), ("Ethereum Foundation", "ethereum.org"), ("Chainlink Labs", "chainlinklabs.com"),
+    ("Aave", "aave.com"), ("Gnosis", "gnosis.io")])
+def test_guess_domains_reach_the_core_name_on_crypto_tlds_within_the_cap(company, expected):
+    from app.resolver import MAX_GUESSES
+    guesses = guess_domains(company, None, MAX_GUESSES)
+    assert expected in guesses and len(guesses) == MAX_GUESSES
+
+
+def test_guess_domains_try_core_name_tlds_before_suffix_joined_ones():
+    guesses = guess_domains("Uniswap Labs", None, 20)
+    assert guesses[:4] == ["uniswaplabs.com", "uniswap.com", "uniswap.org", "uniswap.io"]
+    assert guesses.index("uniswap.xyz") < guesses.index("uniswaplabs.io")
+    assert {"uniswap.fi", "uniswap.finance"} <= set(guesses)
+    assert len(guesses) == len(set(guesses))
 
 
 def test_role_terms_expand_bd():

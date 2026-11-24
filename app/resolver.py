@@ -50,6 +50,15 @@ MAX_DOMAIN_CANDIDATES = 2 + MAX_GUESSES
 
 
 def candidate_domains(company: str, given: Optional[str], max_guesses: int = MAX_GUESSES) -> list[str]:
+    """Domains to probe, in order: the given domain, its registrable root, then name-based guesses.
+
+    TODO (directory lookup, not implemented): name guesses miss projects whose domain is not their name
+    (Chainlink -> chain.link, Lido -> lido.fi). A lookup in a project directory (e.g. the `url`/`website` field of
+    DefiLlama's or CoinGecko's project lists, ideally a cached local snapshot rather than a live call per job)
+    would slot in here: put its domain right after the given ones, before the guesses. Any domain it adds must
+    stay within MAX_DOMAIN_CANDIDATES (or that constant be raised), since job_gate.max_spend_ceiling and
+    agent._spend_ceiling budget one Apollo probe per candidate.
+    """
     given = normalize_domain(given)
     first = [given, registrable_root(given)] if given else []
     return list(dict.fromkeys(d for d in first + guess_domains(company, None, max_guesses) if d))

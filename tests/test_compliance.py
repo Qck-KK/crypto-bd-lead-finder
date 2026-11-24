@@ -97,12 +97,31 @@ def test_people_at_look_alike_companies_are_dropped():
         {"name": "B Two", "title": "BD", "company": "LinkTop supply chain"},
         {"name": "C Three", "title": "BD", "company": "Chainlink Labs"},
         {"name": "D Four", "title": "BD", "company": "chainlink"},
-        {"name": "E Five", "title": "BD", "company": "Chain Link Foundation"},
+        {"name": "E Five", "title": "BD", "company": "Chain Link Foundation"},  # another organisation than Labs
         {"name": "F Six", "title": "BD"},  # no company from the provider: kept with the requested one
         {"name": "G Seven", "title": "BD", "company": "Smartcontract", "website": "https://careers.chain.link"},
     ]
     leads = filter_people(rows, provider="x", company="Chainlink Labs", company_domain="chain.link")
-    assert [lead["name"] for lead in leads] == ["C Three", "D Four", "E Five", "F Six", "G Seven"]
+    assert [lead["name"] for lead in leads] == ["C Three", "D Four", "F Six", "G Seven"]
+
+
+@pytest.mark.parametrize("a, b, same", [
+    ("Uniswap Labs", "Uniswap Foundation", False),
+    ("Uniswap Labs", "Uniswap", True),
+    ("Uniswap Foundation", "uniswap", True),
+    ("Uniswap Labs", "Uniswap Labs, Inc.", True),
+    ("Uniswap Lab", "Uniswap Labs", True),
+    ("Ethereum Foundation", "Ethereum", True),
+    ("Solana Labs", "Solana Foundation", False),
+    ("Near Protocol", "NEAR Foundation", False),
+    ("Aave Protocol", "Aave", True),
+    ("Chainlink Labs", "Chain Link", True),
+    ("Chainlink Labs", "Chainlink Plumbing", False),
+    ("Coinbase Global", "Coinbase", True),
+])
+def test_same_company_tells_labs_foundation_and_protocol_apart(a, b, same):
+    from app.compliance import same_company
+    assert same_company(a, b) is same and same_company(b, a) is same
 
 
 def test_role_matches():

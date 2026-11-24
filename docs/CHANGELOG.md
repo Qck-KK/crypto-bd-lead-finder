@@ -7,6 +7,12 @@
   hands out its best leads, after scoring and suppression. Before, each provider call kept only its first 10
   rows by role match and provider order, so senior people listed at positions 11-15 were never scored, and
   suppressed people used up slots. The search step's `kept` count can now exceed 10.
+- Domain guesses: the core name is tried on .com/.org/.io/.xyz before most suffix-joined forms, so "Uniswap Labs"
+  reaches uniswap.org and "Ethereum Foundation" ethereum.org within the unchanged cap of 4 guesses (so the spend
+  ceiling is unchanged). A directory lookup (DefiLlama/CoinGecko) is left as a TODO in
+  `resolver.candidate_domains`.
+- Company matching: Labs, Foundation and Protocol still match the bare name but no longer each other
+  ("Uniswap Labs" != "Uniswap Foundation"), both for domain confirmation and for which leads are kept.
 
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not
