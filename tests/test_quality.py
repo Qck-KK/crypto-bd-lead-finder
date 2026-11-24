@@ -40,6 +40,28 @@ async def test_resolver_accepts_only_matching_org_and_caches():
     assert again is r and seen == ["chainlinklabs.com"]  # first guess hit; cached afterwards
 
 
+async def test_resolver_finds_uniswap_org_and_ethereum_org_without_a_given_domain():
+    seen = []
+
+    async def probe(domain):
+        seen.append(domain)
+        return {"uniswap.org": ["Uniswap Labs"], "ethereum.org": ["Ethereum Foundation"]}.get(domain, [])
+
+    r = await resolve_company("Uniswap Labs", None, probe)
+    assert (r.domain, r.verified) == ("uniswap.org", True)
+    assert seen == ["uniswaplabs.com", "uniswap.com", "uniswap.org"]
+    r = await resolve_company("Ethereum Foundation", None, probe)
+    assert (r.domain, r.verified) == ("ethereum.org", True)
+
+
+async def test_resolver_does_not_take_the_labs_domain_for_the_foundation():
+    async def probe(domain):
+        return ["Uniswap Labs"] if domain == "uniswap.org" else []
+
+    r = await resolve_company("Uniswap Foundation", None, probe)
+    assert (r.domain, r.verified) == (None, False)
+
+
 async def test_resolver_confirms_given_domain():
     async def probe(domain):
         return ["Uniswap"] if domain == "uniswap.org" else []

@@ -22,8 +22,9 @@ from typing import Optional
 from .compliance import filter_people, role_terms, row_signals
 from .resolver import ResolvedCompany
 from .scoring import rate, score_parts
-from .settings import Settings
+from .settings import MAX_PEOPLE_HARD_CAP, Settings
 from .spend import JobBudget
+from .suppression import Suppression
 from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo, search_people
 
 logger = logging.getLogger(__name__)
@@ -60,8 +61,37 @@ def person_key(lead: dict) -> tuple:
 
 
 def person_hash(lead: dict) -> str:
-    """Stored instead of names (feedback suppression): one-way, not reversible to a name."""
+    """Stored instead of names (feedback suppression): one-way, not reversible to a name. Coarse (see
+    person_key): it is what a masked name can be compared by."""
     return hashlib.sha256("|".join(person_key(lead)).encode()).hexdigest()[:32]
+
+
+def full_name_key(lead: dict) -> Optional[tuple]:
+    """Whole name + company, or None when the name is masked by the provider ("S***h") or has no last name.
+
+    person_key alone confuses different people (Wei Zhang / Wei Zheng, Li Wang / Li Wong share it). Two leads
+    that both have a full name are the same person only if their full names match; person_key is used only when
+    one side is masked."""
+    if "*" in lead["name"]:
+        return None
+    parts = re.findall(r"\w+", lead["name"].lower())
+    if len(parts) < 2:
+        return None
+    return " ".join(parts), re.sub(r"[^a-z0-9]", "", lead["company"].lower())
+
+
+def person_full_hash(lead: dict) -> Optional[str]:
+    """One-way hash of full_name_key (None for masked names), stored next to person_hash."""
+    key = full_name_key(lead)
+    return hashlib.sha256(("full|" + "|".join(key)).encode()).hexdigest()[:32] if key else None
+
+
+def same_person(a: dict, b: dict) -> bool:
+    """Full names compared in full when both sides have one; otherwise the coarse person_key."""
+    if person_key(a) != person_key(b):
+        return False
+    fa, fb = full_name_key(a), full_name_key(b)
+    return fa is None or fb is None or fa == fb
 
 
 def public_view(lead: dict) -> dict:
@@ -70,24 +100,35 @@ def public_view(lead: dict) -> dict:
 
 
 class _Pool:
-    def __init__(self, company: str, role: Optional[str], suppressed: frozenset = frozenset()):
-        self.company, self.role, self.suppressed = company, role, suppressed
-        self.by_person: dict[tuple, dict] = {}
+    def __init__(self, company: str, role: Optional[str], suppressed: "Suppression | frozenset" = frozenset()):
+        self.company, self.role = company, role
+        self.suppressed = suppressed if isinstance(suppressed, Suppression) else Suppression.from_hashes(suppressed)
+        self.by_person: dict[int, dict] = {}  # one entry per person, in the order first found
+        self._by_coarse: dict[tuple, list[int]] = {}  # person_key -> entries sharing it (see same_person)
         self.suppressed_hits = 0
 
+    def _find(self, lead: dict) -> Optional[int]:
+        for i in self._by_coarse.get(person_key(lead), []):
+            if same_person(self.by_person[i], lead):
+                return i
+        return None
+
     def add(self, rows: list[dict], provider: str, domain: Optional[str], evidence: str) -> int:
+        """Scores every row that passes the compliance filter. No truncation here: the per-job cap is applied in
+        `best`, after scoring and suppression, so a senior person listed late by the provider is not lost and a
+        suppressed person does not take a slot. Returns how many rows passed the filter."""
         kept = filter_people(rows, provider=provider, company=self.company, company_domain=domain, role=self.role,
-                             with_rows=True)
+                             limit=None, with_rows=True)
         for lead, row in kept:
-            if person_hash(lead) in self.suppressed:
+            if self.suppressed.matches(person_hash(lead), person_full_hash(lead)):
                 self.suppressed_hits += 1
                 continue
             score, reasons, parts = score_parts(lead, self.role, evidence)
             signals = {**row_signals(row), "providers": [provider or "?"], "evidence": evidence}
             scored = {**lead, "_signals": signals}
             rate(scored, score, reasons, parts)
-            key = person_key(lead)
-            old = self.by_person.get(key)
+            key = self._find(lead)
+            old = self.by_person.get(key) if key is not None else None
             if old:
                 # Same person from another provider: keep the better record, remember every source.
                 providers = sorted(set(old["_signals"]["providers"]) | {provider or "?"})
@@ -96,21 +137,28 @@ class _Pool:
                 best["_signals"] = {**merged, "providers": providers}
                 self.by_person[key] = best
             else:
+                key = len(self.by_person)
                 self.by_person[key] = scored
+                self._by_coarse.setdefault(person_key(lead), []).append(key)
         return len(kept)
 
     def count(self, min_score: int) -> int:
         return sum(1 for lead in self.by_person.values() if lead["quality_score"] >= min_score)
 
     def best(self, limit: int, min_score: int) -> tuple[list[dict], int]:
+        """The top `limit` (never more than MAX_PEOPLE_HARD_CAP) scored, unsuppressed people, and how many were
+        below min_score. The only place the per-job cap is applied."""
+        limit = max(0, min(limit, MAX_PEOPLE_HARD_CAP))
         good = [lead for lead in self.by_person.values() if lead["quality_score"] >= min_score]
         good.sort(key=lambda lead: -lead["quality_score"])  # stable: provider order breaks ties
         return good[:limit], len(self.by_person) - len(good)
 
 
 async def find_leads(settings: Settings, company: str, role: Optional[str], resolved: ResolvedCompany,
-                     tag: str, suppressed: frozenset = frozenset(), budget: Optional[JobBudget] = None) -> RouteResult:
-    """suppressed: person_hash values buyers reported as gone or wrong; never delivered again.
+                     tag: str, suppressed: "Suppression | frozenset" = frozenset(),
+                     budget: Optional[JobBudget] = None) -> RouteResult:
+    """suppressed: who buyer feedback keeps out (feedback store's `suppression()`); a plain set of person_hash
+    values is suppressed outright (tools and tests).
     budget: the job's share of the daily cap; None = unmetered (tools and tests only)."""
     budget = budget if budget is not None else JobBudget()
     pool = _Pool(company, role, suppressed)

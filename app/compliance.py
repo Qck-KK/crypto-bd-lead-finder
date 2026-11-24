@@ -208,12 +208,26 @@ def _core_name_tokens(name: str) -> list[str]:
     return core or tokens
 
 
+# Suffixes that name a distinct organisation in crypto: "Uniswap Labs" (the company) and "Uniswap Foundation" (the
+# grants body) are different BD targets with different people. Each matches the bare name ("Uniswap") but not
+# another kind; legal and generic suffixes (Inc, GmbH, Group, Network, ...) never tell two names apart.
+_ENTITY_KINDS = {"labs": "labs", "lab": "labs", "foundation": "foundation", "protocol": "protocol"}
+
+
+def _entity_kinds(name: str) -> set[str]:
+    return {_ENTITY_KINDS[t] for t in re.findall(r"[a-z0-9]+", name.lower()) if t in _ENTITY_KINDS}
+
+
 def same_company(a: str, b: str) -> bool:
     """Strict: same core name tokens ("Chainlink Labs" == "chainlink" == "Chain Link", but not
-    "Chainlink Plumbing" or "Link Metal")."""
+    "Chainlink Plumbing" or "Link Metal"). Labs/Foundation/Protocol match the bare name but not each other
+    ("Uniswap Labs" == "Uniswap" != "Uniswap Foundation")."""
     ta, tb = _core_name_tokens(a), _core_name_tokens(b)
     # "chainlink" vs "chain link": compare with spaces removed, word order kept.
-    return bool(ta) and (set(ta) == set(tb) or "".join(ta) == "".join(tb))
+    if not (bool(ta) and (set(ta) == set(tb) or "".join(ta) == "".join(tb))):
+        return False
+    ka, kb = _entity_kinds(a), _entity_kinds(b)
+    return not ka or not kb or ka == kb
 
 
 def company_matches(lead_company: str, wanted: str, wanted_domain: str = "", lead_url: str = "") -> bool:
@@ -275,16 +289,28 @@ def role_matches(title: str, role: Optional[str]) -> bool:
     return role_rank(title, role) is not None
 
 
+# Guess order as (stem, TLD); "core" is the name without suffixes (uniswap), "full" keeps them (uniswaplabs).
+# The core name is tried across the TLDs crypto projects use before most suffix-joined forms, so "Uniswap Labs"
+# reaches uniswap.org and "Ethereum Foundation" ethereum.org within the first few guesses. full.com stays first
+# because Apollo indexes some companies there (Chainlink Labs as chainlinklabs.com); for one-word names the two
+# stems are the same and the duplicate drops out.
+_GUESS_ORDER = (("full", "com"), ("core", "com"), ("core", "org"), ("core", "io"), ("core", "xyz"),
+                ("full", "io"), ("core", "fi"), ("core", "finance"), ("core", "network"), ("full", "org"),
+                ("full", "xyz"))
+
+
 def guess_domains(company: str, given: Optional[str] = None, max_guesses: int = 4) -> list[str]:
-    """Domains to try for a company: the given one first, then guesses from the name.
+    """Domains to try for a company: the given one first, then up to max_guesses guesses from the name
+    (in _GUESS_ORDER).
 
     Data providers index a company under its primary domain, which is not always the one people type
-    (Apollo knows Chainlink Labs as chainlinklabs.com, not chain.link).
+    (Apollo knows Chainlink Labs as chainlinklabs.com, not chain.link). Each guess costs one resolver probe and
+    counts toward the job's spend ceiling (resolver.MAX_GUESSES), so the list is kept short.
     """
     tokens = re.findall(r"[a-z0-9]+", company.lower())
     core = [t for t in tokens if t not in _COMPANY_SUFFIXES] or tokens
-    stems = list(dict.fromkeys(["".join(tokens), "".join(core)]))
-    guesses = [f"{s}.{tld}" for tld in ("com", "io", "xyz", "org") for s in stems if s]
+    stems = {"core": "".join(core), "full": "".join(tokens)}
+    guesses = [f"{stems[kind]}.{tld}" for kind, tld in _GUESS_ORDER if stems[kind]]
     first = [normalize_domain(given)] if given else []
     out = list(dict.fromkeys(d for d in first + guesses if d))
     return out[: len(first) + max_guesses]
@@ -311,16 +337,20 @@ def filter_people(
     provider: str,
     company: str,
     company_domain: Optional[str],
-    limit: int = MAX_PEOPLE_HARD_CAP,
+    limit: Optional[int] = MAX_PEOPLE_HARD_CAP,
     role: Optional[str] = None,
     with_rows: bool = False,
 ) -> list:
     """Public leads that match the company and role, closest titles first.
 
+    limit: at most MAX_PEOPLE_HARD_CAP. limit=None keeps every matching row, for callers that score and
+    suppress first and apply the hard cap themselves at their exit (the router's pool: truncating here, before
+    scoring, would drop senior people the provider happened to list late).
+
     with_rows=True returns (lead, source_row) pairs so callers can read row_signals; the row
     itself must never be delivered.
     """
-    limit = max(0, min(limit, MAX_PEOPLE_HARD_CAP))
+    limit = None if limit is None else max(0, min(limit, MAX_PEOPLE_HARD_CAP))
     ranked: list[tuple[int, dict, dict]] = []
     seen: set[tuple[str, str]] = set()
     mismatched = off_role = 0

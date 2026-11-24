@@ -5,7 +5,13 @@ Personalization uses only what the agent knows: the lead's title, seniority and 
 title), the company, and the buyer's offer, name, company and chosen tone. Only those public
 fields are sent to the model, in one request for all leads. Facts are never invented. If the
 model call fails or takes longer than GEMINI_TIMEOUT_S, each lead gets a template so a paid job still
-delivers.
+delivers. That is never silent: it is logged as a warning, and every draft says where it came from
+(`draft_source`, shown to the buyer):
+  "llm"                written by the model
+  "template_fallback"  the model was configured but failed, timed out or skipped this lead
+  "template"           no model is configured on this agent (GEMINI_API_KEY empty)
+
+The model is GEMINI_MODEL (default gemini-2.5-flash, see Settings).
 """
 
 import asyncio
@@ -23,6 +29,7 @@ from .scoring import seniority
 
 logger = logging.getLogger(__name__)
 
+DRAFT_SOURCES = ("llm", "template_fallback", "template")
 LINKEDIN_NOTE_MAX = 280  # LinkedIn allows 300 characters in a connection note; keep a margin.
 TONES = ("friendly", "formal", "concise")
 # Upper bound for the one drafting call; a normal call for 10 leads takes well under this.
@@ -144,7 +151,7 @@ async def write_outreach(
     client: Optional[Any] = None,
     timeout_s: float = DEFAULT_TIMEOUT_S,
 ) -> tuple[list[dict], bool]:
-    """Return (outreach dicts aligned with leads, used_llm).
+    """Return (outreach dicts aligned with leads, used_llm). Each dict carries `draft_source` (DRAFT_SOURCES).
 
     The model call is bounded by ``timeout_s`` (google-genai sets no timeout of its own), and any
     failure, including a timeout or a transport error, falls back to templates: a paid job must not
@@ -181,4 +188,12 @@ async def write_outreach(
     else:
         logger.warning("GEMINI_API_KEY is not set, using template drafts")
 
-    return [drafts.get(i) or template_outreach(lead, ctx) for i, lead in enumerate(leads)], used_llm
+    llm_configured = bool(api_key or client is not None)
+    if drafts and len(drafts) < len(leads):
+        logger.warning("Gemini returned usable drafts for %d of %d leads (model %s), templates for the rest",
+                       len(drafts), len(leads), model)
+    elif llm_configured and not drafts:
+        logger.warning("Gemini produced no usable drafts (model %s): all %d drafts are templates", model, len(leads))
+    fallback = "template_fallback" if llm_configured else "template"
+    return [{**drafts[i], "draft_source": "llm"} if i in drafts else
+            {**template_outreach(lead, ctx), "draft_source": fallback} for i, lead in enumerate(leads)], used_llm

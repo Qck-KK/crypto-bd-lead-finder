@@ -46,7 +46,9 @@ async def test_full_job_output(settings, monkeypatch):
     assert data["leads"][0]["outreach"] == {"subject": "Subject 0", "email": "Draft 0", "linkedin_note": "Note 0"}
     assert set(data["leads"][0]) == {"name", "title", "company", "profile_url", "profile_type", "source",
                                      "outreach_draft", "outreach", "quality_score", "quality", "match_reasons",
-                                     "score_breakdown", "verification"}
+                                     "score_breakdown", "verification", "draft_source"}
+    assert data["leads"][0]["draft_source"] == "llm" and data["summary"]["draft_fallbacks"] == 0
+    assert "Outreach drafts:" not in result and "Template draft" not in result
     assert data["leads"][0]["verification"]["status"] in ("Verified", "Likely", "Unverified")
     assert "_signals" not in result and data["tier"] == "standard"
     assert data["data_source"] == "treg.to"

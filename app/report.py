@@ -10,13 +10,26 @@ from typing import Optional
 
 from .compliance import is_linkedin_profile
 from .settings import DATA_SOURCE, USAGE_NOTICE
+from .suppression import SUPPRESS_MIN_REPORTS, SUPPRESS_TTL_DAYS
 
 FOOTER = f"Data source: {DATA_SOURCE}. {USAGE_NOTICE}"
 
 
 def _outreach(item) -> dict:
     # Plain strings are accepted for callers that only have an email draft.
-    return item if isinstance(item, dict) else {"subject": "", "email": item, "linkedin_note": ""}
+    if not isinstance(item, dict):
+        return {"subject": "", "email": item, "linkedin_note": ""}
+    return {k: v for k, v in item.items() if k != "draft_source"}
+
+
+def _draft_source(item) -> dict:
+    """{"draft_source": ...} when the draft says where it came from (drafts.DRAFT_SOURCES), else nothing."""
+    return {"draft_source": item["draft_source"]} if isinstance(item, dict) and item.get("draft_source") else {}
+
+
+FALLBACK_NOTE = ("{n} of {total} outreach drafts are generic templates because the AI drafting service did not "
+                 "answer for them; personalise them before sending.")
+TEMPLATE_NOTE = "The outreach drafts are generic templates (AI drafting is off on this agent); personalise them."
 
 
 def profile_type(url: str) -> str:
@@ -38,10 +51,12 @@ def build_payload(company: str, role: Optional[str], leads: list[dict], drafts: 
                     "low": labels["Low"], "verified": verified["Verified"], "likely": verified["Likely"],
                     "with_linkedin": sum(profile_type(lead.get("profile_url")) == "linkedin" for lead in leads),
                     "with_full_name": sum("*" not in lead["name"] for lead in leads),
-                    "filtered_low_quality": dropped_low_score, "suppressed_by_feedback": suppressed},
+                    "filtered_low_quality": dropped_low_score, "suppressed_by_feedback": suppressed,
+                    "draft_fallbacks": sum(_draft_source(d).get("draft_source") == "template_fallback"
+                                           for d in drafts[:len(leads)])},
         "count": len(leads),
         "leads": [{**lead, "profile_type": profile_type(lead.get("profile_url")), "outreach": _outreach(d),
-                   "outreach_draft": _outreach(d)["email"]} for lead, d in zip(leads, drafts)],
+                   "outreach_draft": _outreach(d)["email"], **_draft_source(d)} for lead, d in zip(leads, drafts)],
         "search": search or [],
         "enrichment": enrichment,
         "feedback_url": feedback_url,
@@ -102,6 +117,10 @@ def render_markdown(payload: dict) -> str:
         lines.append(f"- **Enrichment:** {_md(enrichment_text(payload['enrichment']))}")
     if payload.get("feedback_url"):
         lines.append(f"- **Rate these leads:** [feedback form]({payload['feedback_url']})")
+    if summary.get("draft_fallbacks"):
+        lines.append(f"- **Outreach drafts:** {FALLBACK_NOTE.format(n=summary['draft_fallbacks'], total=len(leads))}")
+    elif leads and all(lead.get("draft_source") == "template" for lead in leads):
+        lines.append(f"- **Outreach drafts:** {TEMPLATE_NOTE}")
     lines.append("")
 
     if not leads:
@@ -155,6 +174,9 @@ def render_markdown(payload: dict) -> str:
             lines.append(f"- **Source:** {_md(lead['source'])}")
             lines.append("")
             o = lead["outreach"]
+            if lead.get("draft_source") == "template_fallback":
+                lines.append("*Template draft: AI drafting was unavailable for this lead.*")
+                lines.append("")
             if o.get("subject"):
                 lines.append(f"**Email subject:** {_md(o['subject'])}")
                 lines.append("")
@@ -181,7 +203,8 @@ def render_markdown(payload: dict) -> str:
     if payload.get("feedback_url"):
         lines += ["## Feedback", "",
                   f"Tell us which leads were useful: [rate this delivery]({payload['feedback_url']}). "
-                  "People you mark as gone or wrong are never delivered again.", ""]
+                  f"People reported as gone or wrong by {SUPPRESS_MIN_REPORTS} or more orders are left out of "
+                  f"later deliveries for {SUPPRESS_TTL_DAYS} days.", ""]
     return "\n".join(lines)
 
 

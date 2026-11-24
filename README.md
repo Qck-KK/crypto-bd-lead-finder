@@ -24,6 +24,7 @@ draft, and search notes. Each lead has exactly these fields:
 | `source` | `treg.to (<provider>)` |
 | `quality_score`, `quality`, `match_reasons`, `score_breakdown` | 0–100 score, High/Medium/Low, why, and the points per component (see below) |
 | `outreach_draft` | 50–90 word English draft |
+| `draft_source` | `llm` (written by Gemini), `template_fallback` (Gemini failed or timed out; generic template) or `template` (no Gemini key on this agent). `summary.draft_fallbacks` counts the fallbacks, and the report says so. |
 
 The report ends with the data source and the B2B-only notice. It never contains our costs.
 
@@ -94,7 +95,7 @@ left out.
 
 ## Feedback
 
-Tell us which leads were useful: [rate this delivery](https://<agent-url>/feedback?ref=…&t=…). People you mark as gone or wrong are never delivered again.
+Tell us which leads were useful: [rate this delivery](https://<agent-url>/feedback?ref=…&t=…). People reported as gone or wrong by 2 or more orders are left out of later deliveries for 180 days.
 
 ---
 Data source: treg.to. For B2B professional outreach only.
@@ -143,14 +144,17 @@ Two agents run from the same code and are registered separately (Masumi prices a
 - **Personalized outreach** (`app/drafts.py`): per lead a subject (≤ 60 chars), a 60–110 word email and a
   LinkedIn connection note (≤ 280 chars), from the lead's title, seniority and region plus the buyer's offer,
   name, company and tone (`friendly`, `formal`, `concise`). One Gemini call per job, bounded by
-  `GEMINI_TIMEOUT_S` (default 45 s); templates if it fails or times out.
+  `GEMINI_TIMEOUT_S` (default 45 s); templates if it fails or times out, logged as a warning and marked per
+  lead (`draft_source: template_fallback`) so the buyer sees it. Model: `GEMINI_MODEL` (default
+  `gemini-2.5-flash`).
 - **Verification** (`app/verify.py`): no extra requests. Checks employer confirmed by domain, current role,
   record refreshed within 365 days, found by 2+ sources, LinkedIn present. Verified (+5 score), Likely, or
   Unverified (−5).
 - **Buyer feedback** (`app/feedback.py`): every report links to `/feedback?ref=…&t=<HMAC>` (needs
   `FEEDBACK_SECRET` and `AGENT_PUBLIC_URL`). Buyers rate 1–5 and mark leads useful / not useful / left the
-  company / wrong person. People marked gone or wrong are never delivered again. Stored: person hashes and
-  titles, no names. `GET /feedback/summary` with header `x-admin-token: $FEEDBACK_ADMIN_TOKEN`.
+  company / wrong person. A person marked gone or wrong by at least `SUPPRESS_MIN_REPORTS` (2) different
+  orders within `SUPPRESS_TTL_DAYS` (180) is left out of later deliveries (`app/suppression.py`); full names
+  are compared in full, masked names by the coarse key. Stored: person hashes and titles, no names. `GET /feedback/summary` with header `x-admin-token: $FEEDBACK_ADMIN_TOKEN`.
 
 ## Search and quality
 

@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### Iteration 13 — overnight fixes on branch optimize-2026-11 (2026-11-24, not yet deployed)
+- Router: every row that passes the compliance filter is scored; the 10-person cap applies only when the pool
+  hands out its best leads, after scoring and suppression. Before, each provider call kept only its first 10
+  rows by role match and provider order, so senior people listed at positions 11-15 were never scored, and
+  suppressed people used up slots. The search step's `kept` count can now exceed 10.
+- Domain guesses: the core name is tried on .com/.org/.io/.xyz before most suffix-joined forms, so "Uniswap Labs"
+  reaches uniswap.org and "Ethereum Foundation" ethereum.org within the unchanged cap of 4 guesses (so the spend
+  ceiling is unchanged). A directory lookup (DefiLlama/CoinGecko) is left as a TODO in
+  `resolver.candidate_domains`.
+- Company matching: Labs, Foundation and Protocol still match the bare name but no longer each other
+  ("Uniswap Labs" != "Uniswap Foundation"), both for domain confirmation and for which leads are kept.
+- Person identity: two leads that both have a full name are merged only if the full names match. The coarse key
+  (first name + first/last letter of the last name + company) is used only when one name is masked, so
+  Wei Zhang / Wei Zheng and Li Wang / Li Wong are no longer merged into one lead.
+- Feedback suppression: one "left the company / wrong person" mark no longer removes a person for every buyer
+  forever. A person is left out while at least `SUPPRESS_MIN_REPORTS` (2) different orders reported them within
+  `SUPPRESS_TTL_DAYS` (180 days); taking a mark back withdraws that order's report. Reports on full names count
+  only for that full name; masked names are compared by the coarse key.
+  - Schema (additive, created in place under the ledger's schema advisory lock): table `suppression_reports`
+    (one row per order and lead). Deliveries also store `full_hash` per lead (JSONB, absent in old rows).
+  - Old `suppressed_people` rows are still read: their `reports` count as that many orders on the coarse hash,
+    within 180 days of `updated_at`. They are no longer written. Rows with a single report therefore stop
+    suppressing after the upgrade.
+  - Report and thank-you page wording changed accordingly; `/feedback/summary` gains `suppression_reports`
+    and `suppressed_people` now counts people suppressed right now.
+- Outreach fallback is visible: each lead gets an additive `draft_source` (`llm`, `template_fallback`,
+  `template`), `summary.draft_fallbacks` counts fallbacks, and the report says which drafts are templates. A
+  partial answer from Gemini (drafts for only some leads) is now logged as a warning too. The `outreach` object
+  is unchanged. Model: already `GEMINI_MODEL`, default `gemini-2.5-flash`; no retired model is hard-coded.
+- CI: `.github/workflows/tests.yml` runs the full suite on push and pull request against a `postgres:16`
+  service (`TEST_DATABASE_URL`) and fails if any test is skipped, so the PostgreSQL tests always run. Not yet
+  run on GitHub (written and checked locally).
+
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not
   passed, so expired unpaid orders no longer hold the 30 slots until a restart. An unreadable pay-by time
