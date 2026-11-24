@@ -311,16 +311,20 @@ def filter_people(
     provider: str,
     company: str,
     company_domain: Optional[str],
-    limit: int = MAX_PEOPLE_HARD_CAP,
+    limit: Optional[int] = MAX_PEOPLE_HARD_CAP,
     role: Optional[str] = None,
     with_rows: bool = False,
 ) -> list:
     """Public leads that match the company and role, closest titles first.
 
+    limit: at most MAX_PEOPLE_HARD_CAP. limit=None keeps every matching row, for callers that score and
+    suppress first and apply the hard cap themselves at their exit (the router's pool: truncating here, before
+    scoring, would drop senior people the provider happened to list late).
+
     with_rows=True returns (lead, source_row) pairs so callers can read row_signals; the row
     itself must never be delivered.
     """
-    limit = max(0, min(limit, MAX_PEOPLE_HARD_CAP))
+    limit = None if limit is None else max(0, min(limit, MAX_PEOPLE_HARD_CAP))
     ranked: list[tuple[int, dict, dict]] = []
     seen: set[tuple[str, str]] = set()
     mismatched = off_role = 0

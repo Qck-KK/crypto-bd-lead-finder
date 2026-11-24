@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Iteration 13 — overnight fixes on branch optimize-2026-11 (2026-11-24, not yet deployed)
+- Router: every row that passes the compliance filter is scored; the 10-person cap applies only when the pool
+  hands out its best leads, after scoring and suppression. Before, each provider call kept only its first 10
+  rows by role match and provider order, so senior people listed at positions 11-15 were never scored, and
+  suppressed people used up slots. The search step's `kept` count can now exceed 10.
+
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not
   passed, so expired unpaid orders no longer hold the 30 slots until a restart. An unreadable pay-by time

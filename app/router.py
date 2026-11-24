@@ -22,7 +22,7 @@ from typing import Optional
 from .compliance import filter_people, role_terms, row_signals
 from .resolver import ResolvedCompany
 from .scoring import rate, score_parts
-from .settings import Settings
+from .settings import MAX_PEOPLE_HARD_CAP, Settings
 from .spend import JobBudget
 from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo, search_people
 
@@ -76,8 +76,11 @@ class _Pool:
         self.suppressed_hits = 0
 
     def add(self, rows: list[dict], provider: str, domain: Optional[str], evidence: str) -> int:
+        """Scores every row that passes the compliance filter. No truncation here: the per-job cap is applied in
+        `best`, after scoring and suppression, so a senior person listed late by the provider is not lost and a
+        suppressed person does not take a slot. Returns how many rows passed the filter."""
         kept = filter_people(rows, provider=provider, company=self.company, company_domain=domain, role=self.role,
-                             with_rows=True)
+                             limit=None, with_rows=True)
         for lead, row in kept:
             if person_hash(lead) in self.suppressed:
                 self.suppressed_hits += 1
@@ -103,6 +106,9 @@ class _Pool:
         return sum(1 for lead in self.by_person.values() if lead["quality_score"] >= min_score)
 
     def best(self, limit: int, min_score: int) -> tuple[list[dict], int]:
+        """The top `limit` (never more than MAX_PEOPLE_HARD_CAP) scored, unsuppressed people, and how many were
+        below min_score. The only place the per-job cap is applied."""
+        limit = max(0, min(limit, MAX_PEOPLE_HARD_CAP))
         good = [lead for lead in self.by_person.values() if lead["quality_score"] >= min_score]
         good.sort(key=lambda lead: -lead["quality_score"])  # stable: provider order breaks ties
         return good[:limit], len(self.by_person) - len(good)
