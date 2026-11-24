@@ -31,6 +31,9 @@
   `template`), `summary.draft_fallbacks` counts fallbacks, and the report says which drafts are templates. A
   partial answer from Gemini (drafts for only some leads) is now logged as a warning too. The `outreach` object
   is unchanged. Model: already `GEMINI_MODEL`, default `gemini-2.5-flash`; no retired model is hard-coded.
+- CI: `.github/workflows/tests.yml` runs the full suite on push and pull request against a `postgres:16`
+  service (`TEST_DATABASE_URL`) and fails if any test is skipped, so the PostgreSQL tests always run. Not yet
+  run on GitHub (written and checked locally).
 
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not
