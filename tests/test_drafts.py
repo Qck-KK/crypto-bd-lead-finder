@@ -117,3 +117,63 @@ def test_default_timeout_and_setting(monkeypatch):
 async def test_no_key_uses_templates_without_calling():
     out, used_llm = await write_outreach(LEADS, OutreachContext(), api_key="", model="m")
     assert not used_llm and len(out) == 2 and "Best," not in out[0]["email"]
+
+
+# --- the fallback is visible (draft_source) ------------------------------------------------------------------
+
+async def test_every_draft_says_where_it_came_from(caplog):
+    out, _ = await write_outreach(LEADS, CTX, api_key="k", model="m", client=_resp(
+        [{"index": 0, "subject": "S", "email": "Hi Alice", "linkedin_note": "Hi"}]))
+    assert [o["draft_source"] for o in out] == ["llm", "template_fallback"]  # the model skipped Bob
+    assert "usable drafts for 1 of 2 leads" in caplog.text
+
+    caplog.clear()
+    out, used_llm = await write_outreach(LEADS, CTX, api_key="k", model="m",
+                                         client=FakeGemini(exc=errors.APIError(503, {"error": {"message": "x"}})))
+    assert not used_llm and [o["draft_source"] for o in out] == ["template_fallback"] * 2
+    assert "Gemini drafting failed (model m)" in caplog.text
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+    out, _ = await write_outreach(LEADS, CTX, api_key="", model="m")
+    assert [o["draft_source"] for o in out] == ["template", "template"]
+
+
+def test_report_shows_the_fallback_and_keeps_the_outreach_object_unchanged():
+    from app.report import build_result
+
+    leads = [{**lead, "quality_score": 50, "quality": "Medium"} for lead in LEADS]
+    drafts = [{"subject": "S", "email": "Hi Alice", "linkedin_note": "N", "draft_source": "llm"},
+              {"subject": "T", "email": "Hi Bob", "linkedin_note": "M", "draft_source": "template_fallback"}]
+    result = build_result("Example Labs", None, leads, drafts)
+    data = json.loads(result.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert [lead["draft_source"] for lead in data["leads"]] == ["llm", "template_fallback"]
+    assert data["leads"][1]["outreach"] == {"subject": "T", "email": "Hi Bob", "linkedin_note": "M"}
+    assert data["summary"]["draft_fallbacks"] == 1
+    assert "**Outreach drafts:** 1 of 2 outreach drafts are generic templates" in result
+    assert result.count("*Template draft: AI drafting was unavailable for this lead.*") == 1
+
+    off = build_result("Example Labs", None, leads, [{**d, "draft_source": "template"} for d in drafts])
+    assert "AI drafting is off on this agent" in off and "Template draft:" not in off
+    legacy = build_result("Example Labs", None, leads, ["Hi Alice", "Hi Bob"])  # plain strings: no source
+    assert "draft_source" not in legacy and "Outreach drafts:" not in legacy
+
+
+async def test_a_job_whose_drafting_fails_tells_the_buyer(settings, monkeypatch, caplog):
+    import respx as _respx
+
+    from app import drafts as drafts_module
+    from app.agent import process_job
+
+    with _respx.mock:
+        _respx.post("https://treg.test/call/apollo.people.search").mock(return_value=httpx.Response(200, json={
+            "people": [{"first_name": "Jane", "last_name": "Doe", "title": "Head of BD",
+                        "organization": {"name": "Acme"}}]}))
+        _respx.post("https://treg.test/call/treg.people.search").mock(
+            return_value=httpx.Response(200, json={"output": {"people": []}}))
+        monkeypatch.setattr(drafts_module.genai, "Client", lambda api_key: FakeGemini(exc=TimeoutError()))
+        result = await process_job("p-fallback", {"company": "Acme", "role": "BD", "company_domain": "acme.io"},
+                                   settings)
+    data = json.loads(result.split("```json\n", 1)[1].split("\n```", 1)[0])
+    assert data["leads"][0]["draft_source"] == "template_fallback" and data["summary"]["draft_fallbacks"] == 1
+    assert "AI drafting service did not answer" in result
+    assert "timed out" in caplog.text or "failed" in caplog.text

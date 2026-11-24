@@ -27,6 +27,10 @@
     suppressing after the upgrade.
   - Report and thank-you page wording changed accordingly; `/feedback/summary` gains `suppression_reports`
     and `suppressed_people` now counts people suppressed right now.
+- Outreach fallback is visible: each lead gets an additive `draft_source` (`llm`, `template_fallback`,
+  `template`), `summary.draft_fallbacks` counts fallbacks, and the report says which drafts are templates. A
+  partial answer from Gemini (drafts for only some leads) is now logged as a warning too. The `outreach` object
+  is unchanged. Model: already `GEMINI_MODEL`, default `gemini-2.5-flash`; no retired model is hard-coded.
 
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not

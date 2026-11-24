@@ -24,6 +24,7 @@ draft, and search notes. Each lead has exactly these fields:
 | `source` | `treg.to (<provider>)` |
 | `quality_score`, `quality`, `match_reasons`, `score_breakdown` | 0–100 score, High/Medium/Low, why, and the points per component (see below) |
 | `outreach_draft` | 50–90 word English draft |
+| `draft_source` | `llm` (written by Gemini), `template_fallback` (Gemini failed or timed out; generic template) or `template` (no Gemini key on this agent). `summary.draft_fallbacks` counts the fallbacks, and the report says so. |
 
 The report ends with the data source and the B2B-only notice. It never contains our costs.
 
@@ -143,7 +144,9 @@ Two agents run from the same code and are registered separately (Masumi prices a
 - **Personalized outreach** (`app/drafts.py`): per lead a subject (≤ 60 chars), a 60–110 word email and a
   LinkedIn connection note (≤ 280 chars), from the lead's title, seniority and region plus the buyer's offer,
   name, company and tone (`friendly`, `formal`, `concise`). One Gemini call per job, bounded by
-  `GEMINI_TIMEOUT_S` (default 45 s); templates if it fails or times out.
+  `GEMINI_TIMEOUT_S` (default 45 s); templates if it fails or times out, logged as a warning and marked per
+  lead (`draft_source: template_fallback`) so the buyer sees it. Model: `GEMINI_MODEL` (default
+  `gemini-2.5-flash`).
 - **Verification** (`app/verify.py`): no extra requests. Checks employer confirmed by domain, current role,
   record refreshed within 365 days, found by 2+ sources, LinkedIn present. Verified (+5 score), Likely, or
   Unverified (−5).
