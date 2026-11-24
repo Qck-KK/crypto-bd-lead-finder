@@ -192,18 +192,23 @@ async def test_postgres_feedback_store():
     store = PostgresFeedbackStore(os.environ["TEST_DATABASE_URL"])
     try:
         pool = await store._p()
+        await pool.execute("DELETE FROM suppression_reports WHERE ref LIKE 'test-%'")
         await pool.execute("DELETE FROM feedback WHERE ref LIKE 'test-%'")
         await pool.execute("DELETE FROM feedback_deliveries WHERE ref LIKE 'test-%'")
         await pool.execute("DELETE FROM suppressed_people WHERE hash LIKE 'test-%'")
-        await store.remember_delivery("test-r", "Acme", [{"hash": "test-h0", "title": "BD"},
+        for ref in ("test-r", "test-r2"):
+            await store.remember_delivery(ref, "Acme", [{"hash": "test-h0", "title": "BD"},
                                                         {"hash": "test-h1", "title": "CTO"}])
         assert (await store.get_delivery("test-r"))["leads"][1]["title"] == "CTO"
         await store.save_feedback("test-r", 4, {0: "left_company", 1: "useful"}, "ok")
         await store.save_feedback("test-r", 5, {0: "left_company"}, "again")  # no double count
-        assert "test-h0" in await store.suppressed_hashes() and "test-h1" not in await store.suppressed_hashes()
-        assert await pool.fetchval("SELECT reports FROM suppressed_people WHERE hash = 'test-h0'") == 1
+        assert await pool.fetchval("SELECT count(*) FROM suppression_reports WHERE hash = 'test-h0'") == 1
+        assert not (await store.suppression()).matches("test-h0")  # one order is not enough
+        await store.save_feedback("test-r2", 2, {0: "wrong_person"}, "")
+        sup = await store.suppression()
+        assert sup.matches("test-h0") and not sup.matches("test-h1")
         summary = await store.summary()
-        assert summary["responses"] >= 1 and summary["suppressed_people"] >= 1
+        assert summary["responses"] >= 2 and summary["suppressed_people"] >= 1 and summary["suppression_reports"] >= 2
     finally:
         await store.close()
 

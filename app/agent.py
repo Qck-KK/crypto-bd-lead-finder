@@ -18,10 +18,11 @@ from .logs import job_tag_var
 from .pricing import estimate
 from .report import FOOTER, build_result
 from .resolver import candidate_domains, resolve_company
-from .router import find_leads, person_hash, public_view
+from .router import find_leads, person_full_hash, person_hash, public_view
 from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
 from .spend import BudgetUnavailable, JobBudget
+from .suppression import Suppression
 from .treg_client import APOLLO_MAX_COST_USD, search_apollo
 from .verify import apply_verification, verify_lead
 
@@ -272,10 +273,10 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     store = feedback.get_store()
 
     try:
-        suppressed = await store.suppressed_hashes()
+        suppressed = await store.suppression()
     except Exception as e:  # feedback storage must never block a paid job
         logger.warning("Suppression list unavailable: %s", type(e).__name__)
-        suppressed = frozenset()
+        suppressed = Suppression()
 
     # Reserve before the first treg call (the resolver probe). Every attempt has its own hold.
     want = _spend_ceiling(settings, company, domain)
@@ -321,8 +322,9 @@ async def _run_job(input_data: dict, settings: Settings, tag: str, metrics: dict
     link = feedback.feedback_link(settings.public_url, tag, settings.feedback_secret)
     if link:
         try:
-            await store.remember_delivery(tag, company, [{"hash": person_hash(lead), "title": lead["title"]}
-                                                         for lead in leads])
+            await store.remember_delivery(tag, company, [
+                {"hash": person_hash(lead), "full_hash": person_full_hash(lead), "title": lead["title"]}
+                for lead in leads])
         except Exception as e:
             logger.warning("Could not record delivery for feedback: %s", type(e).__name__)
             link = None

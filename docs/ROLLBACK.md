@@ -42,6 +42,9 @@ identity, such as the deployed `a97ca3e` or BL-13 `4fd86b5`. Do not deploy the o
 ## What stays in the database (all additive, ignored by the old code)
 
 - **New tables:** `spend_attempts` and `ledger_meta`; nothing is dropped.
+- **`suppression_reports`** (feedback, per-order reports): ignored by the old code, which reads only
+  `suppressed_people`. That table is no longer written, so after a rollback the old code suppresses exactly the
+  people it suppressed before the upgrade; reports made in between are not applied by it.
 - **New `job_costs` columns:** `cost_assumed_calls` and `unconfirmed_usd`. The old code's `INSERT` names its
   columns, so the defaults apply.
 - **Cache rows:** `job_results` rows under v2 tags are never looked up by the old code.

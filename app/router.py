@@ -24,6 +24,7 @@ from .resolver import ResolvedCompany
 from .scoring import rate, score_parts
 from .settings import MAX_PEOPLE_HARD_CAP, Settings
 from .spend import JobBudget
+from .suppression import Suppression
 from .treg_client import APOLLO_MAX_COST_USD, TregError, search_apollo, search_people
 
 logger = logging.getLogger(__name__)
@@ -99,8 +100,9 @@ def public_view(lead: dict) -> dict:
 
 
 class _Pool:
-    def __init__(self, company: str, role: Optional[str], suppressed: frozenset = frozenset()):
-        self.company, self.role, self.suppressed = company, role, suppressed
+    def __init__(self, company: str, role: Optional[str], suppressed: "Suppression | frozenset" = frozenset()):
+        self.company, self.role = company, role
+        self.suppressed = suppressed if isinstance(suppressed, Suppression) else Suppression.from_hashes(suppressed)
         self.by_person: dict[int, dict] = {}  # one entry per person, in the order first found
         self._by_coarse: dict[tuple, list[int]] = {}  # person_key -> entries sharing it (see same_person)
         self.suppressed_hits = 0
@@ -118,7 +120,7 @@ class _Pool:
         kept = filter_people(rows, provider=provider, company=self.company, company_domain=domain, role=self.role,
                              limit=None, with_rows=True)
         for lead, row in kept:
-            if person_hash(lead) in self.suppressed:
+            if self.suppressed.matches(person_hash(lead), person_full_hash(lead)):
                 self.suppressed_hits += 1
                 continue
             score, reasons, parts = score_parts(lead, self.role, evidence)
@@ -153,8 +155,10 @@ class _Pool:
 
 
 async def find_leads(settings: Settings, company: str, role: Optional[str], resolved: ResolvedCompany,
-                     tag: str, suppressed: frozenset = frozenset(), budget: Optional[JobBudget] = None) -> RouteResult:
-    """suppressed: person_hash values buyers reported as gone or wrong; never delivered again.
+                     tag: str, suppressed: "Suppression | frozenset" = frozenset(),
+                     budget: Optional[JobBudget] = None) -> RouteResult:
+    """suppressed: who buyer feedback keeps out (feedback store's `suppression()`); a plain set of person_hash
+    values is suppressed outright (tools and tests).
     budget: the job's share of the daily cap; None = unmetered (tools and tests only)."""
     budget = budget if budget is not None else JobBudget()
     pool = _Pool(company, role, suppressed)

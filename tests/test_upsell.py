@@ -238,17 +238,29 @@ async def test_feedback_form_submit_suppress_and_summary(fb_client, monkeypatch)
         assert bad.status_code == 403
         r = await client.post("/feedback", content=f"ref={ref}&t={token}&rating=2&lead_0=left_company&lead_1=useful"
                               "&comment=thanks", headers={"content-type": "application/x-www-form-urlencoded"})
-        assert r.status_code == 200 and "Thank you" in r.text
+        assert r.status_code == 200 and "Thank you" in r.text and "2 or more orders" in r.text
 
+        # One order's report is not enough: the next order still gets the person.
         gone = first["leads"][0]["name"]
         second = _extract_json(await process_job("b2", {"company": "Acme Labs", "role": "BD",
                                                         "company_domain": "acme.io"}, s))
-        assert gone not in [lead["name"] for lead in second["leads"]]
-        assert second["summary"]["suppressed_by_feedback"] == 1
+        assert gone == second["leads"][0]["name"] and second["summary"]["suppressed_by_feedback"] == 0
+
+        # A second, different order reports the same person: now they are left out.
+        ref2, token2 = second["feedback_url"].split("ref=")[1].split("&t=")
+        assert ref2 != ref
+        r = await client.post("/feedback", json={"ref": ref2, "t": token2, "rating": 3,
+                                                  "labels": {"0": "wrong_person"}})
+        assert r.status_code == 200
+        third = _extract_json(await process_job("b3", {"company": "Acme Labs", "role": "BD",
+                                                       "company_domain": "acme.io"}, s))
+        assert gone not in [lead["name"] for lead in third["leads"]]
+        assert third["summary"]["suppressed_by_feedback"] == 1
 
     assert (await client.get("/feedback/summary")).status_code == 403
     summary = (await client.get("/feedback/summary", headers={"x-admin-token": "admin-1"})).json()
-    assert summary["responses"] == 1 and summary["avg_rating"] == 2 and summary["suppressed_people"] == 1
+    assert summary["responses"] == 2 and summary["avg_rating"] == 2.5 and summary["suppressed_people"] == 1
+    assert summary["suppression_reports"] == 2
 
 
 async def test_feedback_rejects_bad_rating_and_unknown_job(fb_client):
@@ -262,4 +274,7 @@ async def test_feedback_rejects_bad_rating_and_unknown_job(fb_client):
     assert ok.json() == {"status": "ok"}
     # Resubmitting does not count the same report twice.
     await client.post("/feedback", json={"ref": "r1", "t": t, "rating": 4, "labels": {"0": "wrong_person"}})
-    assert store.suppressed["h"]["reports"] == 1
+    assert [k for k in store.reports] == [("r1", 0)]
+    # Taking the mark back withdraws the report.
+    await client.post("/feedback", json={"ref": "r1", "t": t, "rating": 4, "labels": {"0": "useful"}})
+    assert store.reports == {}

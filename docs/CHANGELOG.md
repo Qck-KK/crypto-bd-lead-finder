@@ -16,6 +16,17 @@
 - Person identity: two leads that both have a full name are merged only if the full names match. The coarse key
   (first name + first/last letter of the last name + company) is used only when one name is masked, so
   Wei Zhang / Wei Zheng and Li Wang / Li Wong are no longer merged into one lead.
+- Feedback suppression: one "left the company / wrong person" mark no longer removes a person for every buyer
+  forever. A person is left out while at least `SUPPRESS_MIN_REPORTS` (2) different orders reported them within
+  `SUPPRESS_TTL_DAYS` (180 days); taking a mark back withdraws that order's report. Reports on full names count
+  only for that full name; masked names are compared by the coarse key.
+  - Schema (additive, created in place under the ledger's schema advisory lock): table `suppression_reports`
+    (one row per order and lead). Deliveries also store `full_hash` per lead (JSONB, absent in old rows).
+  - Old `suppressed_people` rows are still read: their `reports` count as that many orders on the coarse hash,
+    within 180 days of `updated_at`. They are no longer written. Rows with a single report therefore stop
+    suppressing after the upgrade.
+  - Report and thank-you page wording changed accordingly; `/feedback/summary` gains `suppression_reports`
+    and `suppressed_people` now counts people suppressed right now.
 
 ### Iteration 12 — preflight fixes: B1, BL-33 all-or-nothing, D1 (2026-11-02)
 - B1: the unpaid-order limit counts only orders whose Payment Service pay-by time (`pay_by_time`) has not

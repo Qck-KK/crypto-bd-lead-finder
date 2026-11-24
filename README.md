@@ -94,7 +94,7 @@ left out.
 
 ## Feedback
 
-Tell us which leads were useful: [rate this delivery](https://<agent-url>/feedback?ref=…&t=…). People you mark as gone or wrong are never delivered again.
+Tell us which leads were useful: [rate this delivery](https://<agent-url>/feedback?ref=…&t=…). People reported as gone or wrong by 2 or more orders are left out of later deliveries for 180 days.
 
 ---
 Data source: treg.to. For B2B professional outreach only.
@@ -149,8 +149,9 @@ Two agents run from the same code and are registered separately (Masumi prices a
   Unverified (−5).
 - **Buyer feedback** (`app/feedback.py`): every report links to `/feedback?ref=…&t=<HMAC>` (needs
   `FEEDBACK_SECRET` and `AGENT_PUBLIC_URL`). Buyers rate 1–5 and mark leads useful / not useful / left the
-  company / wrong person. People marked gone or wrong are never delivered again. Stored: person hashes and
-  titles, no names. `GET /feedback/summary` with header `x-admin-token: $FEEDBACK_ADMIN_TOKEN`.
+  company / wrong person. A person marked gone or wrong by at least `SUPPRESS_MIN_REPORTS` (2) different
+  orders within `SUPPRESS_TTL_DAYS` (180) is left out of later deliveries (`app/suppression.py`); full names
+  are compared in full, masked names by the coarse key. Stored: person hashes and titles, no names. `GET /feedback/summary` with header `x-admin-token: $FEEDBACK_ADMIN_TOKEN`.
 
 ## Search and quality
 

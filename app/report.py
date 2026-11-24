@@ -10,6 +10,7 @@ from typing import Optional
 
 from .compliance import is_linkedin_profile
 from .settings import DATA_SOURCE, USAGE_NOTICE
+from .suppression import SUPPRESS_MIN_REPORTS, SUPPRESS_TTL_DAYS
 
 FOOTER = f"Data source: {DATA_SOURCE}. {USAGE_NOTICE}"
 
@@ -181,7 +182,8 @@ def render_markdown(payload: dict) -> str:
     if payload.get("feedback_url"):
         lines += ["## Feedback", "",
                   f"Tell us which leads were useful: [rate this delivery]({payload['feedback_url']}). "
-                  "People you mark as gone or wrong are never delivered again.", ""]
+                  f"People reported as gone or wrong by {SUPPRESS_MIN_REPORTS} or more orders are left out of "
+                  f"later deliveries for {SUPPRESS_TTL_DAYS} days.", ""]
     return "\n".join(lines)
 
 
